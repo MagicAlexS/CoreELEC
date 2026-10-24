@@ -1,0 +1,135 @@
+Subject: [PATCH] VideoPlayer: separate external subtitle visibility from DVD SPU
+
+Base: CoreELEC/xbmc acc0fc66bc6af69c31a93c5d17e36900343263b7
+Status: source-reviewed candidate; not yet compiled or device-regression tested.
+
+Use the renderer visibility for external DVD subtitle tracks. Keep external
+on/off requests and DVD SPU visibility events from changing each other.
+Preserve the existing navigator path for native DVD subtitles.
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+index 60acdc9cbaaaf58e0bcf59403b05532f57851c1e..0f947eee48468b9fb81e82435ada603764205910 100644
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -961,7 +961,7 @@ void CVideoPlayer::OpenDefaultStreams(bool reset)
+     if (valid && !visible)
+       SetEnableStream(m_CurrentSubtitle, false);
+ 
+-    SetSubtitleVisibleInternal(visible);
++    SetSubtitleVisibleInternal(visible, m_CurrentSubtitle.source);
+   }
+ 
+   // open teletext stream
+@@ -2902,6 +2902,7 @@ void CVideoPlayer::HandleMessages()
+           {
+             m_dvd.iSelectedSPUStream = -1;
+             CloseStream(m_CurrentSubtitle, false);
++            UpdateContentState();
+           }
+         }
+         else
+@@ -2919,7 +2920,7 @@ void CVideoPlayer::HandleMessages()
+       if (!isVisible)
+         SetEnableStream(m_CurrentSubtitle, false);
+ 
+-      SetSubtitleVisibleInternal(isVisible);
++      SetSubtitleVisibleInternal(isVisible, m_CurrentSubtitle.source);
+     }
+     else if (pMsg->IsType(CDVDMsg::PLAYER_SET_PROGRAM))
+     {
+@@ -3069,7 +3070,8 @@ void CVideoPlayer::HandleMessages()
+       if (id >= 0)
+       {
+         SetSubtitle(id);
+-        SetSubtitleVisibleInternal(true);
++        const int source = m_SelectionStreams.Get(STREAM_SUBTITLE, id).source;
++        SetSubtitleVisibleInternal(true, source);
+       }
+     }
+     else if (pMsg->IsType(CDVDMsg::GENERAL_SYNCHRONIZE))
+@@ -3383,8 +3385,24 @@ bool CVideoPlayer::GetSubtitleVisible() const
+ {
+   if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
+   {
+-    std::shared_ptr<CDVDInputStreamNavigator> pStream = std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream);
+-    return pStream->IsSubtitleStreamEnabled();
++    bool externalSubtitleSelected = false;
++    {
++      std::unique_lock<CCriticalSection> lock(m_content.m_section);
++      const int subtitleIndex = m_content.m_subtitleIndex;
++      if (subtitleIndex >= 0 &&
++          subtitleIndex < m_content.m_selectionStreams.CountType(STREAM_SUBTITLE))
++      {
++        externalSubtitleSelected = IsExternalSubtitleSource(
++            m_content.m_selectionStreams.Get(STREAM_SUBTITLE, subtitleIndex).source);
++      }
++    }
++
++    if (!externalSubtitleSelected)
++    {
++      std::shared_ptr<CDVDInputStreamNavigator> pStream =
++          std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream);
++      return pStream->IsSubtitleStreamEnabled();
++    }
+   }
+ 
+   return m_VideoPlayerVideo->IsSubtitleEnabled();
+@@ -3403,11 +3421,18 @@ void CVideoPlayer::SetEnableStream(CCurrentStream& current, bool isEnabled)
+     m_pDemuxer->EnableStream(current.demuxerId, current.id, isEnabled);
+ }
+ 
+-void CVideoPlayer::SetSubtitleVisibleInternal(bool bVisible)
++bool CVideoPlayer::IsExternalSubtitleSource(int source)
++{
++  const int sourceType = STREAM_SOURCE_MASK(source);
++  return sourceType == STREAM_SOURCE_TEXT || sourceType == STREAM_SOURCE_DEMUX_SUB;
++}
++
++void CVideoPlayer::SetSubtitleVisibleInternal(bool bVisible, int subtitleSource)
+ {
+   m_VideoPlayerVideo->EnableSubtitle(bVisible);
+ 
+-  if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
++  if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD) &&
++      !IsExternalSubtitleSource(subtitleSource))
+     std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream)->EnableSubtitleStream(bVisible);
+ 
+   CServiceBroker::GetDataCacheCore().SignalSubtitleInfoChange();
+@@ -3898,7 +3923,7 @@ void CVideoPlayer::AdaptForcedSubtitles()
+     if (!isVisible)
+       SetEnableStream(m_CurrentSubtitle, false);
+ 
+-    SetSubtitleVisibleInternal(isVisible);
++    SetSubtitleVisibleInternal(isVisible, m_CurrentSubtitle.source);
+   }
+ }
+ 
+@@ -4224,8 +4249,13 @@ int CVideoPlayer::OnDiscNavResult(void* pData, int iMessage)
+ 
+         int iStream = event->physical_wide;
+         bool visible = !(iStream & 0x80);
++        const bool externalSubtitleSelected =
++            IsExternalSubtitleSource(m_CurrentSubtitle.source);
+ 
+-        SetSubtitleVisibleInternal(visible);
++        // DVD SPU visibility belongs to the navigator; do not let it override
++        // the independently selected external subtitle renderer.
++        if (!externalSubtitleSelected)
++          SetSubtitleVisibleInternal(visible, m_CurrentSubtitle.source);
+ 
+         if (iStream >= 0)
+           m_dvd.iSelectedSPUStream = (iStream & ~0x80);
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+index 01cbca01197f692ba7bd333923b41e4d3a166a4f..d7157138515dfb37074f1610f99c1530030013d2 100644
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -417,7 +417,8 @@ protected:
+    */
+   void SetEnableStream(CCurrentStream& current, bool isEnabled);
+ 
+-  void SetSubtitleVisibleInternal(bool bVisible);
++  static bool IsExternalSubtitleSource(int source);
++  void SetSubtitleVisibleInternal(bool bVisible, int subtitleSource);
+ 
+   /**
+    * one of the DVD_PLAYSPEED defines
