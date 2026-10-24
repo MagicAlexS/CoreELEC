@@ -10,11 +10,16 @@ sudo apt-get install --no-install-recommends -y \
   xz-utils zip zstd
 
 sudo locale-gen en_US.UTF-8
-sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
-  --slave /usr/bin/cpp cpp /usr/bin/cpp-12 \
-  --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
-  --slave /usr/bin/gcov gcov /usr/bin/gcov-12
-sudo update-alternatives --set gcc /usr/bin/gcc-12
+
+# Hosted runners already register cpp as an independent alternatives group.
+# Select GCC 12 through this job's PATH without changing those global groups.
+host_tools="${RUNNER_TEMP:?RUNNER_TEMP is required}/coreelec-host-tools"
+mkdir -p "${host_tools}"
+for tool in gcc g++ cpp gcov; do
+  ln -sfn "/usr/bin/${tool}-12" "${host_tools}/${tool}"
+done
+printf '%s\n' "${host_tools}" >> "${GITHUB_PATH:?GITHUB_PATH is required}"
+export PATH="${host_tools}:${PATH}"
 
 gcc --version
 go version
