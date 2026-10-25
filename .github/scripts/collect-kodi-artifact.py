@@ -27,6 +27,10 @@ ARTWORK_PATCH_PATH = Path("projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/k
 ARTWORK_PATCH_SHA256 = "d4be75db321788a567eaa212dcdc7e73f79b34f7603ab1fbc318827498f9bd0d"
 
 
+MUSIC_PATCH_PATH = Path("projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-92-paplayer-stop-on-error.patch")
+MUSIC_PATCH_SHA256 = "9c618be2fc50456f8883122684cdd340e19b77aa8b213e97e57653c196099ad3"
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -52,12 +56,26 @@ def main() -> int:
     if not artwork_patch.is_file() or sha256(artwork_patch) != ARTWORK_PATCH_SHA256:
         raise RuntimeError("The expected playback artwork patch is missing or changed.")
 
+    music_patch = root / MUSIC_PATCH_PATH
+    if not music_patch.is_file() or sha256(music_patch) != MUSIC_PATCH_SHA256:
+        raise RuntimeError("The reviewed music stop patch is missing or changed.")
+
     build_log = output_dir / "build.log"
-    if not build_log.is_file() or PATCH_FILENAME not in build_log.read_text(errors="replace"):
+    if not build_log.is_file():
+        raise RuntimeError("Kodi package build log is missing.")
+    # Host tools can unpack/patch Kodi during the separate dependency phase.
+    build_logs = "\n".join(
+        path.read_text(errors="replace") for path in
+        (output_dir / "dependency-build.log", build_log) if path.is_file()
+    )
+    if PATCH_FILENAME not in build_logs:
         raise RuntimeError("Build log does not confirm that the device patch was applied.")
 
-    if ARTWORK_PATCH_PATH.name not in build_log.read_text(errors="replace"):
+    if ARTWORK_PATCH_PATH.name not in build_logs:
         raise RuntimeError("Build log does not confirm the playback artwork patch was applied.")
+
+    if MUSIC_PATCH_PATH.name not in build_logs:
+        raise RuntimeError("Build log does not confirm the music stop patch was applied.")
 
     pattern = f"build.CoreELEC-Amlogic-ng.arm-*/install_pkg/kodi-{KODI_VERSION}/usr/lib/kodi/kodi.bin"
     candidates = sorted(root.glob(pattern))
@@ -91,6 +109,15 @@ def main() -> int:
         "patch_sha256": PATCH_SHA256,
         "artwork_patch_path": ARTWORK_PATCH_PATH.as_posix(),
         "artwork_patch_sha256": ARTWORK_PATCH_SHA256,
+        "music_patch_path": MUSIC_PATCH_PATH.as_posix(),
+        "music_patch_sha256": MUSIC_PATCH_SHA256,
+        "source_overrides": {
+            "rtmpdump": {
+                "version": "f1b83c10d8beb43fcc70a6e88cf4325499f25857",
+                "sha256": "c68e05989a93c002e3ba8df3baef0021c17099aa2123a9c096a5cc8e029caf95",
+                "url": "https://distfiles.macports.org/rtmpdump/f1b83c10d8beb43fcc70a6e88cf4325499f25857.tar.gz",
+            }
+        },
         "project": "Amlogic-ce",
         "device": "Amlogic-ng",
         "arch": "arm",

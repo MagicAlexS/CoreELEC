@@ -71,3 +71,20 @@ if [[ ! -f "${ARTWORK_PATCH_PATH}" ]] || [[ "$(sha256sum "${ARTWORK_PATCH_PATH}"
   exit 1
 fi
 printf 'Artwork patch SHA256: %s  %s\n' "${ARTWORK_PATCH_SHA256}" "${ARTWORK_PATCH_PATH}"
+
+# Preserve the original source version/checksum while replacing its dead host.
+readonly RTMPDUMP_RECIPE="packages/multimedia/rtmpdump/package.mk"
+readonly RTMPDUMP_RECIPE_SHA256="43b1c66dd5785ef031ef50d397cc57aa6800d0e0482ec1572462c26005e787fe"
+if [[ "$(sha256sum "${RTMPDUMP_RECIPE}" | awk '{print $1}')" != "${RTMPDUMP_RECIPE_SHA256}" ]]; then
+  echo "The verified rtmpdump source override changed." >&2
+  exit 1
+fi
+printf 'rtmpdump recipe SHA256: %s\n' "${RTMPDUMP_RECIPE_SHA256}"
+
+readonly MUSIC_PATCH_PATH="projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-92-paplayer-stop-on-error.patch"
+readonly MUSIC_PATCH_SHA256="9c618be2fc50456f8883122684cdd340e19b77aa8b213e97e57653c196099ad3"
+if [[ ! -f "${MUSIC_PATCH_PATH}" ]] || [[ "$(sha256sum "${MUSIC_PATCH_PATH}" | awk '{print $1}')" != "${MUSIC_PATCH_SHA256}" ]]; then
+  echo "Music stop patch from the reviewed pull request is missing or changed." >&2
+  exit 1
+fi
+printf 'Music stop patch SHA256: %s  %s\n' "${MUSIC_PATCH_SHA256}" "${MUSIC_PATCH_PATH}"

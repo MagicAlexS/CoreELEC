@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import posixpath
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -18,6 +20,9 @@ BUILD_ROOT_NAME = os.environ.get(
 )
 KODI_SOURCE_VERSION = os.environ.get(
     "KODI_SOURCE_SHA", "acc0fc66bc6af69c31a93c5d17e36900343263b7"
+)
+TARGET_NAME = os.environ.get(
+    "COREELEC_TARGET_NAME", "armv8a-libreelec-linux-gnueabihf"
 )
 MAX_SNAPSHOT_BYTES = int(os.environ.get("COREELEC_CACHE_MAX_BYTES", 7 * 1024**3))
 CCACHE_LIMIT = os.environ.get("CCACHE_MAXSIZE", "1G")
@@ -43,6 +48,97 @@ def workspace() -> Path:
 
 def build_root(root: Path) -> Path:
     return root / BUILD_ROOT_NAME
+
+
+def toolchain_markers() -> tuple[tuple[str, bool], ...]:
+    toolchain = f"{BUILD_ROOT_NAME}/toolchain"
+    sysroot = f"{toolchain}/{TARGET_NAME}/sysroot/usr"
+    return (
+        (f"{toolchain}/bin/host-gcc", True),
+        (f"{toolchain}/bin/host-g++", True),
+        (f"{toolchain}/bin/{TARGET_NAME}-gcc", True),
+        (f"{sysroot}/include", False),
+        (f"{sysroot}/lib", False),
+    )
+
+
+def toolchain_is_usable(root: Path) -> bool:
+    for relative, executable in toolchain_markers():
+        path = root / relative
+        if executable:
+            if not path.is_file() or not os.access(path, os.X_OK):
+                return False
+        elif not path.is_dir():
+            return False
+    return True
+
+
+def unverified_source_excludes(root: Path) -> list[str]:
+    """Return unverified source files and their CoreELEC sidecars.
+
+    CoreELEC's archive getter writes .url and .sha256 only after a download
+    passes its checksum. Git source trees are left alone because they have a
+    different validation and storage format.
+    """
+    sources = root / "sources"
+    if not sources.is_dir():
+        return []
+
+    git_roots: set[Path] = set()
+    for directory, child_dirs, child_files in os.walk(sources, followlinks=False):
+        current = Path(directory)
+        if ".git" in child_dirs or ".git" in child_files:
+            git_roots.add(current)
+
+    def inside_git_tree(path: Path) -> bool:
+        return any(path == git_root or git_root in path.parents for git_root in git_roots)
+
+    excluded: set[str] = set()
+    valid_sidecars: set[Path] = set()
+    payloads: list[Path] = []
+    sidecars: set[Path] = set()
+    for directory, child_dirs, child_files in os.walk(sources, followlinks=False):
+        current = Path(directory)
+        if inside_git_tree(current):
+            child_dirs[:] = []
+            continue
+        for filename in child_files:
+            if filename.endswith((".url", ".sha256")):
+                sidecars.add(current / filename)
+                continue
+            payloads.append(current / filename)
+
+    for payload in payloads:
+        url_path = Path(f"{payload}.url")
+        sha_path = Path(f"{payload}.sha256")
+        valid = False
+        if (
+            not payload.is_symlink()
+            and payload.is_file()
+            and url_path.is_file()
+            and sha_path.is_file()
+        ):
+            expected = sha_path.read_text(encoding="ascii", errors="ignore").strip().lower()
+            if expected and len(expected) == 64 and all(
+                character in "0123456789abcdef" for character in expected
+            ):
+                hasher = hashlib.sha256()
+                with payload.open("rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        hasher.update(chunk)
+                digest = hasher.hexdigest()
+                valid = digest == expected and bool(
+                    url_path.read_text(encoding="utf-8", errors="ignore").strip()
+                )
+        if valid:
+            valid_sidecars.update((url_path, sha_path))
+        else:
+            for path in (payload, url_path, sha_path):
+                if path.exists() or path.is_symlink():
+                    excluded.add(path.relative_to(root).as_posix())
+    for sidecar in sidecars - valid_sidecars:
+        excluded.add(sidecar.relative_to(root).as_posix())
+    return sorted(excluded)
 
 
 def selected_paths(root: Path, mode: str) -> list[str]:
@@ -79,6 +175,10 @@ def run_tar_zstd(root: Path, paths: list[str], output: Path) -> None:
     command = [tar, "--create", "--file=-", "--directory", str(root)]
     for pattern in tar_excludes():
         command.extend(("--exclude", pattern))
+    if "sources" in paths:
+        for path in unverified_source_excludes(root):
+            # These are literal paths; archive names may contain glob syntax.
+            command.extend(("--no-wildcards", "--exclude", path, "--wildcards"))
     command.extend(("--", *paths))
     tmp = output.with_name(output.name + ".tmp")
     tmp.unlink(missing_ok=True)
@@ -160,6 +260,7 @@ def inspect_archive(archive: Path) -> tuple[str, int]:
     assert process.stdout is not None
     names: set[str] = set()
     roots_seen: set[str] = set()
+    member_kinds: dict[str, tuple[bool, bool, int]] = {}
     try:
         with tarfile.open(fileobj=process.stdout, mode="r|") as tar:
             for member in tar:
@@ -175,6 +276,11 @@ def inspect_archive(archive: Path) -> tuple[str, int]:
                     target = posixpath.normpath(posixpath.join(link_base, member.linkname))
                     validate_target(target)
                 names.add(name)
+                member_kinds[name] = (
+                    member.isdir(),
+                    member.isfile() or member.issym() or member.islnk(),
+                    member.mode,
+                )
                 for allowed in allowed_roots():
                     if is_under(name, allowed):
                         roots_seen.add(allowed)
@@ -189,6 +295,15 @@ def inspect_archive(archive: Path) -> tuple[str, int]:
     if not names:
         raise ValueError("cache archive is empty")
     mode = "full" if f"{BUILD_ROOT_NAME}/toolchain" in roots_seen else "ccache-only"
+    if mode == "full":
+        for relative, executable in toolchain_markers():
+            if relative not in member_kinds:
+                raise ValueError(f"full cache missing toolchain marker: {relative}")
+            is_directory, is_filelike, mode_bits = member_kinds[relative]
+            if executable and (not is_filelike or not mode_bits & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+                raise ValueError(f"invalid compiler marker in cache: {relative}")
+            if not executable and not is_directory:
+                raise ValueError(f"invalid sysroot marker in cache: {relative}")
     return mode, len(names)
 
 
@@ -292,7 +407,10 @@ def pack(archive: Path) -> int:
     archive = (root / archive).resolve() if not archive.is_absolute() else archive.resolve()
     archive.parent.mkdir(parents=True, exist_ok=True)
     archive.unlink(missing_ok=True)
-    modes = (("full", selected_paths(root, "full")), ("ccache-only", selected_paths(root, "ccache")))
+    modes = (
+        ("full", selected_paths(root, "full")),
+        ("ccache-only", selected_paths(root, "ccache")),
+    )
     zstd = shutil.which("zstd")
     if not zstd:
         log("zstd is unavailable; not saving build cache")
@@ -301,6 +419,9 @@ def pack(archive: Path) -> int:
     for mode, paths in modes:
         if not paths or (mode == "full" and f"{BUILD_ROOT_NAME}/toolchain" not in paths):
             log(f"mode={mode} unavailable; trying smaller cache")
+            continue
+        if mode == "full" and not toolchain_is_usable(root):
+            log("full snapshot skipped; required compilers or target sysroot are missing")
             continue
         try:
             run_tar_zstd(root, paths, archive)

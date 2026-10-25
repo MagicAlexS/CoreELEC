@@ -20,8 +20,10 @@ jobs:
       ARCH: arm
       CORE_ELEC_BASELINE: 8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56
       KODI_SOURCE_SHA: acc0fc66bc6af69c31a93c5d17e36900343263b7
-      BUILD_CACHE_PREFIX: coreelec-build-v1-linux-x64-ubuntu22.04-Amlogic-ce-Amlogic-ng-arm-8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56-acc0fc66bc6af69c31a93c5d17e36900343263b7
+      BUILD_CACHE_PREFIX: coreelec-build-v2-linux-x64-ubuntu22.04-Amlogic-ce-Amlogic-ng-arm-8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56-acc0fc66bc6af69c31a93c5d17e36900343263b7
+      COREELEC_TARGET_NAME: armv8a-libreelec-linux-gnueabihf
       CCACHE_MAXSIZE: 1G
+      MTWITHLOCKS: "no"
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -50,15 +52,20 @@ jobs:
         shell: bash
         run: bash .github/scripts/test-build-cache.sh
 
+      - name: Verify Kodi dependency phase wrapper
+        shell: bash
+        run: bash .github/scripts/test-build-kodi-dependencies.sh
+
       - name: Restore bounded CoreELEC build cache
         id: coreelec-cache
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         continue-on-error: true
         with:
           path: .coreelec-build-cache.tar.zst
-          key: ${{ env.BUILD_CACHE_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ env.BUILD_CACHE_PREFIX }}-restore-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ env.BUILD_CACHE_PREFIX }}-
+            ${{ env.BUILD_CACHE_PREFIX }}-full-
+            ${{ env.BUILD_CACHE_PREFIX }}-ccache-only-
 
       - name: Validate and restore build snapshot
         shell: bash
@@ -72,31 +79,52 @@ jobs:
         shell: bash
         run: bash .github/scripts/check-build-inputs.sh 2>&1 | tee artifacts/source-check.log
 
+      - name: Preflight rtmpdump source
+        shell: bash
+        run: PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=arm ./scripts/get rtmpdump 2>&1 | tee artifacts/rtmpdump-preflight.log
+
+      - name: Build Kodi dependencies
+        timeout-minutes: 300
+        shell: bash
+        run: bash .github/scripts/build-kodi-dependencies.sh 2>&1 | tee artifacts/dependency-build.log
+
+      - name: Pack dependency checkpoint
+        id: dependency-cache-pack
+        if: success()
+        shell: bash
+        run: python3 .github/scripts/build-cache.py pack --archive .coreelec-build-cache.tar.zst
+
+      - name: Save dependency checkpoint
+        if: success() && steps.dependency-cache-pack.outputs.save == 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        continue-on-error: true
+        with:
+          path: .coreelec-build-cache.tar.zst
+          key: ${{ env.BUILD_CACHE_PREFIX }}-${{ steps.dependency-cache-pack.outputs.mode }}-dependencies-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Build Kodi package
         timeout-minutes: 300
         shell: bash
-        run: |
-          set -Eeuo pipefail
-          PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=arm ./scripts/build kodi 2>&1 | tee artifacts/build.log
+        run: PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=arm ./scripts/build kodi 2>&1 | tee artifacts/build.log
 
       - name: Collect kodi.bin and build manifest
         if: success()
         shell: bash
         run: python3 .github/scripts/collect-kodi-artifact.py --output-dir artifacts
 
-      - name: Pack bounded build cache snapshot
-        id: build-cache-pack
+      - name: Pack complete build checkpoint
+        id: complete-cache-pack
         if: success()
         shell: bash
         run: python3 .github/scripts/build-cache.py pack --archive .coreelec-build-cache.tar.zst
 
-      - name: Save CoreELEC build cache
-        if: success() && steps.build-cache-pack.outputs.save == 'true'
+      - name: Save complete build checkpoint
+        if: success() && steps.complete-cache-pack.outputs.save == 'true'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         continue-on-error: true
         with:
           path: .coreelec-build-cache.tar.zst
-          key: ${{ env.BUILD_CACHE_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ env.BUILD_CACHE_PREFIX }}-${{ steps.complete-cache-pack.outputs.mode }}-complete-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload build output and logs
         if: always()

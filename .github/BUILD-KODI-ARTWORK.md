@@ -22,6 +22,17 @@ requires both patches to appear in the build log and records both checksums.
 The cross-built unit test is not executed by this package-build workflow.
 Compilation alone does not establish real-device correctness.
 
+The combined build also requires the reviewed PAPlayer stop-on-open-error
+patch (PR #1). Input checks and the artifact manifest pin all three patches.
+Both dependency and package logs are checked because host tools can unpack
+and apply Kodi patches during the dependency phase.
+
+The rtmpdump source URL uses the MacPorts HTTPS distfile with exactly the
+original SHA-256 and commit. Its source download is checked before compiling.
+Dependencies are built as a separate successful phase and cached immediately,
+before Kodi itself is compiled, so a later Kodi failure retains that checkpoint.
+Arbitrary failed build trees are not saved as complete dependency caches.
+
 Build caching restores a pinned toolchain, dependency stamps/install outputs,
 source downloads and compiler caches. Kodi's own build stamp and installed
 product are excluded so an old successful build cannot skip a changed patch.
