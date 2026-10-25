@@ -65,7 +65,7 @@ printf 'Patch SHA256: %s  %s\n' "${actual_patch_sha256}" "${PATCH_PATH}"
 printf 'Target: %s / %s / %s\n' "${PROJECT}" "${DEVICE}" "${ARCH}"
 
 readonly ARTWORK_PATCH_PATH="projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-91-playback-state-artwork.patch"
-readonly ARTWORK_PATCH_SHA256="437782665e0271aac3df010ee157fccc0389a999a20d1510563e7b93b203f12c"
+readonly ARTWORK_PATCH_SHA256="d4be75db321788a567eaa212dcdc7e73f79b34f7603ab1fbc318827498f9bd0d"
 if [[ ! -f "${ARTWORK_PATCH_PATH}" ]] || [[ "$(sha256sum "${ARTWORK_PATCH_PATH}" | awk '{print $1}')" != "${ARTWORK_PATCH_SHA256}" ]]; then
   echo "Playback state artwork patch is missing or changed." >&2
   exit 1

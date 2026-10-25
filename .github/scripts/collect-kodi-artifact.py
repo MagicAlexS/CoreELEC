@@ -24,7 +24,7 @@ PATCH_PATH = Path(
 PATCH_SHA256 = "567336a6fdfcf802f02cf8b0b1295801ed5abfca20a35f13ca1b319b006de127"
 PATCH_FILENAME = PATCH_PATH.name
 ARTWORK_PATCH_PATH = Path("projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-91-playback-state-artwork.patch")
-ARTWORK_PATCH_SHA256 = "437782665e0271aac3df010ee157fccc0389a999a20d1510563e7b93b203f12c"
+ARTWORK_PATCH_SHA256 = "d4be75db321788a567eaa212dcdc7e73f79b34f7603ab1fbc318827498f9bd0d"
 
 
 def sha256(path: Path) -> str:

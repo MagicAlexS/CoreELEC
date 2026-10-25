@@ -1,20 +1,21 @@
 diff --git a/xbmc/test/TestFileItem.cpp b/xbmc/test/TestFileItem.cpp
-index e78ba27..fb40e11 100644
+index e78ba27..6934460 100644
 --- a/xbmc/test/TestFileItem.cpp
 +++ b/xbmc/test/TestFileItem.cpp
-@@ -13,6 +13,7 @@
+@@ -13,6 +13,8 @@
  #include "settings/Settings.h"
  #include "settings/SettingsComponent.h"
  #include "settings/lib/SettingsManager.h"
++#include "video/Bookmark.h"
 +#include "video/VideoInfoTag.h"
  
  #include <gtest/gtest.h>
  
-@@ -99,6 +100,40 @@ const TestFileData NoArtFiles[] = {{ "c:\\dir\\filename.avi", false, "c:\\dir\\f
+@@ -99,6 +101,50 @@ const TestFileData NoArtFiles[] = {{ "c:\\dir\\filename.avi", false, "c:\\dir\\f
  
  INSTANTIATE_TEST_SUITE_P(NoArt, TestFileItemFallbackArt, ValuesIn(NoArtFiles));
  
-+TEST(TestFileItem, PlaybackStateUpdatePreservesLibraryArt)
++TEST(TestFileItem, PlaybackStateReceiversRetainCompleteLibraryArt)
 +{
 +  CFileItem libraryItem("videodb://movies/titles/1346/", false);
 +  libraryItem.GetVideoInfoTag()->m_iDbId = 1346;
@@ -30,37 +31,63 @@ index e78ba27..fb40e11 100644
 +  playbackUpdate.GetVideoInfoTag()->m_iDbId = 1346;
 +  playbackUpdate.GetVideoInfoTag()->m_type = "movie";
 +  playbackUpdate.SetArt("thumb", "image://video@nfs://media/movie/BDMV/index.bdmv/");
++  // Model FillLibraryArt merging the database art into the sparse playback item.
++  playbackUpdate.AppendArt(libraryItem.GetArt());
 +  CBookmark resumePoint;
 +  resumePoint.timeInSeconds = 1175.0;
 +  resumePoint.totalTimeInSeconds = 6000.0;
 +  playbackUpdate.GetVideoInfoTag()->SetResumePoint(resumePoint);
 +
-+  // Mirrors the art-free playback state notification sent by SaveFileStateJob.
-+  playbackUpdate.ClearArt();
-+  libraryItem.UpdateInfo(playbackUpdate);
++  CFileItem updateInfoReceiver(libraryItem);
++  updateInfoReceiver.UpdateInfo(playbackUpdate);
 +
-+  EXPECT_EQ("poster.jpg", libraryItem.GetArt("poster"));
-+  EXPECT_EQ("library-thumb.jpg", libraryItem.GetArt("thumb"));
-+  EXPECT_EQ("fanart.jpg", libraryItem.GetArt("fanart"));
-+  EXPECT_EQ("landscape.jpg", libraryItem.GetArt("landscape"));
-+  EXPECT_EQ("backdrop.jpg", libraryItem.GetArt("backdrop"));
-+  EXPECT_DOUBLE_EQ(1175.0, libraryItem.GetVideoInfoTag()->GetResumePoint().timeInSeconds);
-+  EXPECT_FALSE(libraryItem.GetProperty("libraryartfilled").asBoolean());
++  CFileItem replacingReceiver(libraryItem);
++  replacingReceiver = playbackUpdate;
++
++  const auto expectPlaybackStateAndArt = [](const CFileItem& updatedItem)
++  {
++    EXPECT_EQ("poster.jpg", updatedItem.GetArt("poster"));
++    EXPECT_EQ("library-thumb.jpg", updatedItem.GetArt("thumb"));
++    EXPECT_EQ("fanart.jpg", updatedItem.GetArt("fanart"));
++    EXPECT_EQ("landscape.jpg", updatedItem.GetArt("landscape"));
++    EXPECT_EQ("backdrop.jpg", updatedItem.GetArt("backdrop"));
++    EXPECT_DOUBLE_EQ(1175.0,
++                     updatedItem.GetVideoInfoTag()->GetResumePoint().timeInSeconds);
++  };
++
++  expectPlaybackStateAndArt(updateInfoReceiver);
++  expectPlaybackStateAndArt(replacingReceiver);
 +}
 +
  class TestFileItemBasePath : public AdvancedSettingsResetBase,
                               public WithParamInterface<TestFileData>
  {
 diff --git a/xbmc/utils/SaveFileStateJob.cpp b/xbmc/utils/SaveFileStateJob.cpp
-index aa23b11..3b62c08 100644
+index aa23b11..8b23006 100644
 --- a/xbmc/utils/SaveFileStateJob.cpp
 +++ b/xbmc/utils/SaveFileStateJob.cpp
-@@ -170,6 +170,8 @@ void CSaveFileState::DoWork(CFileItem& item,
-         {
-           CUtil::DeleteVideoDatabaseDirectoryCache();
-           CFileItemPtr msgItem(new CFileItem(item));
-+          // Playback state updates must not replace list art with sparse player art.
-+          msgItem->ClearArt();
+@@ -28,6 +28,7 @@
+ #include "utils/Variant.h"
+ #include "video/Bookmark.h"
+ #include "video/VideoDatabase.h"
++#include "video/VideoThumbLoader.h"
+ 
+ void CSaveFileState::DoWork(CFileItem& item,
+                             CBookmark& bookmark,
+@@ -173,6 +174,16 @@ void CSaveFileState::DoWork(CFileItem& item,
            if (item.HasProperty("original_listitem_url"))
              msgItem->SetPath(item.GetProperty("original_listitem_url").asString());
  
++          if (msgItem->HasVideoInfoTag())
++          {
++            const CVideoInfoTag* tag = msgItem->GetVideoInfoTag();
++            if (tag->m_iDbId >= 0 && !tag->m_type.empty())
++            {
++              // Keep full library art for receivers that replace the entire CFileItem.
++              CVideoThumbLoader().FillLibraryArt(*msgItem);
++            }
++          }
++
+           // Could be part of an ISO stack. In this case the bookmark is saved onto the part.
+           // In order to properly update the list, we need to refresh the stack's resume point
+           const auto& components = CServiceBroker::GetAppComponents();
