@@ -23,6 +23,8 @@ PATCH_PATH = Path(
 )
 PATCH_SHA256 = "567336a6fdfcf802f02cf8b0b1295801ed5abfca20a35f13ca1b319b006de127"
 PATCH_FILENAME = PATCH_PATH.name
+ARTWORK_PATCH_PATH = Path("projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-91-playback-state-artwork.patch")
+ARTWORK_PATCH_SHA256 = "437782665e0271aac3df010ee157fccc0389a999a20d1510563e7b93b203f12c"
 
 
 def sha256(path: Path) -> str:
@@ -46,9 +48,16 @@ def main() -> int:
     if not patch.is_file() or sha256(patch) != PATCH_SHA256:
         raise RuntimeError("The expected DVD subtitle patch is missing or changed.")
 
+    artwork_patch = root / ARTWORK_PATCH_PATH
+    if not artwork_patch.is_file() or sha256(artwork_patch) != ARTWORK_PATCH_SHA256:
+        raise RuntimeError("The expected playback artwork patch is missing or changed.")
+
     build_log = output_dir / "build.log"
     if not build_log.is_file() or PATCH_FILENAME not in build_log.read_text(errors="replace"):
         raise RuntimeError("Build log does not confirm that the device patch was applied.")
+
+    if ARTWORK_PATCH_PATH.name not in build_log.read_text(errors="replace"):
+        raise RuntimeError("Build log does not confirm the playback artwork patch was applied.")
 
     pattern = f"build.CoreELEC-Amlogic-ng.arm-*/install_pkg/kodi-{KODI_VERSION}/usr/lib/kodi/kodi.bin"
     candidates = sorted(root.glob(pattern))
@@ -80,6 +89,8 @@ def main() -> int:
         "kodi_source_revision": KODI_VERSION,
         "patch_path": PATCH_PATH.as_posix(),
         "patch_sha256": PATCH_SHA256,
+        "artwork_patch_path": ARTWORK_PATCH_PATH.as_posix(),
+        "artwork_patch_sha256": ARTWORK_PATCH_SHA256,
         "project": "Amlogic-ce",
         "device": "Amlogic-ng",
         "arch": "arm",

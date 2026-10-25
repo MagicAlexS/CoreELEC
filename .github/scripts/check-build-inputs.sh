@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly EXPECTED_BRANCH="codex/fix-dvd-external-subtitles"
+readonly EXPECTED_BRANCH="codex/fix-playback-state-artwork"
 readonly EXPECTED_COREELEC_BASELINE="8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56"
 readonly EXPECTED_KODI_VERSION="acc0fc66bc6af69c31a93c5d17e36900343263b7"
 readonly EXPECTED_PATCH_SHA256="567336a6fdfcf802f02cf8b0b1295801ed5abfca20a35f13ca1b319b006de127"
@@ -63,3 +63,11 @@ printf 'CoreELEC HEAD: %s\n' "$(git rev-parse HEAD)"
 printf 'Kodi source: %s\n' "${EXPECTED_KODI_VERSION}"
 printf 'Patch SHA256: %s  %s\n' "${actual_patch_sha256}" "${PATCH_PATH}"
 printf 'Target: %s / %s / %s\n' "${PROJECT}" "${DEVICE}" "${ARCH}"
+
+readonly ARTWORK_PATCH_PATH="projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-91-playback-state-artwork.patch"
+readonly ARTWORK_PATCH_SHA256="437782665e0271aac3df010ee157fccc0389a999a20d1510563e7b93b203f12c"
+if [[ ! -f "${ARTWORK_PATCH_PATH}" ]] || [[ "$(sha256sum "${ARTWORK_PATCH_PATH}" | awk '{print $1}')" != "${ARTWORK_PATCH_SHA256}" ]]; then
+  echo "Playback state artwork patch is missing or changed." >&2
+  exit 1
+fi
+printf 'Artwork patch SHA256: %s  %s\n' "${ARTWORK_PATCH_SHA256}" "${ARTWORK_PATCH_PATH}"
