@@ -1,0 +1,86 @@
+Subject: [PATCH] PAPlayer: stop playback when an audio queue item fails
+
+Base: CoreELEC/xbmc acc0fc66bc6af69c31a93c5d17e36900343263b7
+
+PAPlayer opens audio asynchronously, so its failed queue jobs bypass the
+synchronous playlist retry limit. Requesting the next item can repeatedly
+walk an inaccessible music playlist.
+
+Post the playlist-player stop message instead. The GUI thread closes the
+player after the queue job returns, avoiding a worker-thread self-wait and
+leaving normal end-of-track advancement and the queue contents unchanged.
+
+diff --git a/xbmc/cores/paplayer/PAPlayer.cpp b/xbmc/cores/paplayer/PAPlayer.cpp
+--- a/xbmc/cores/paplayer/PAPlayer.cpp
++++ b/xbmc/cores/paplayer/PAPlayer.cpp
+@@ -9,6 +9,7 @@
+ #include "PAPlayer.h"
+ 
+ #include "FileItem.h"
++#include "GUIUserMessages.h"
+ #include "ICodec.h"
+ #include "ServiceBroker.h"
+ #include "URL.h"
+@@ -19,6 +20,9 @@
+ #include "cores/AudioEngine/Utils/AEUtil.h"
+ #include "cores/DataCacheCore.h"
+ #include "cores/VideoPlayer/Process/ProcessInfo.h"
++#include "guilib/GUIComponent.h"
++#include "guilib/GUIMessage.h"
++#include "guilib/GUIWindowManager.h"
+ #include "messaging/ApplicationMessenger.h"
+ #include "music/tags/MusicInfoTag.h"
+ #include "settings/AdvancedSettings.h"
+@@ -37,6 +41,16 @@
+ #define TIME_TO_CACHE_NEXT_FILE 5000 /* 5 seconds before end of song, start caching the next song */
+ #define FAST_XFADE_TIME           80 /* 80 milliseconds */
+ #define MAX_SKIP_XFADE_TIME     2000 /* max 2 seconds crossfade on track skip */
++
++namespace
++{
++void StopPlaybackAfterQueueError()
++{
++  // Stop on the GUI thread: closing PAPlayer here would wait on this queue job.
++  CGUIMessage message(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0);
++  CServiceBroker::GetGUI()->GetWindowManager().SendThreadMessage(message);
++}
++} // namespace
+ 
+ // PAP: Psycho-acoustic Audio Player
+ // Supporting all open  audio codec standards.
+@@ -326,9 +340,9 @@
+   {
+     CLog::Log(LOGWARNING, "PAPlayer::QueueNextFileEx - Failed to create the decoder");
+ 
+-    // advance playlist
++    // Preserve start notifications, then stop through the main thread.
+     AdvancePlaylistOnError(*si->m_fileItem);
+-    m_callback.OnQueueNextItem();
++    StopPlaybackAfterQueueError();
+ 
+     delete si;
+     return false;
+@@ -346,9 +360,9 @@
+       CLog::Log(LOGINFO, "PAPlayer::QueueNextFileEx - Error reading samples");
+ 
+       si->m_decoder.Destroy();
+-      // advance playlist
++      // Preserve start notifications, then stop through the main thread.
+       AdvancePlaylistOnError(*si->m_fileItem);
+-      m_callback.OnQueueNextItem();
++      StopPlaybackAfterQueueError();
+       delete si;
+       return false;
+     }
+@@ -426,9 +440,9 @@
+     CLog::Log(LOGINFO, "PAPlayer::QueueNextFileEx - Error preparing stream");
+ 
+     si->m_decoder.Destroy();
+-    // advance playlist
++    // Preserve start notifications, then stop through the main thread.
+     AdvancePlaylistOnError(*si->m_fileItem);
+-    m_callback.OnQueueNextItem();
++    StopPlaybackAfterQueueError();
+     delete si;
+     return false;
+   }
