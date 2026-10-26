@@ -22,3 +22,5 @@ and requires all four patch names in dependency/build logs. Device validation
 must verify the running binary hash, media UI transitions, ordinary playback,
 failed music opens and preservation of DVD/artwork behavior. This branch does
 not automatically deploy or publish a release.
+
+Builds run on codex/fix-playback-state-artwork to reuse the existing scoped compiler caches. The cache prefix and the original three patch checksums remain unchanged.
