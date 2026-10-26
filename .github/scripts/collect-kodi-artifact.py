@@ -30,6 +30,9 @@ ARTWORK_PATCH_SHA256 = "d4be75db321788a567eaa212dcdc7e73f79b34f7603ab1fbc3188274
 MUSIC_PATCH_PATH = Path("projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-92-paplayer-stop-on-error.patch")
 MUSIC_PATCH_SHA256 = "9c618be2fc50456f8883122684cdd340e19b77aa8b213e97e57653c196099ad3"
 
+GUIINFO_PATCH_PATH = Path("projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-93-guiinfo-thread-safety.patch")
+GUIINFO_PATCH_SHA256 = "1a13751c5036497b4058988df3809759249459261c3c440f230aeae5297fac7f"
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -60,6 +63,10 @@ def main() -> int:
     if not music_patch.is_file() or sha256(music_patch) != MUSIC_PATCH_SHA256:
         raise RuntimeError("The reviewed music stop patch is missing or changed.")
 
+    guiinfo_patch = root / GUIINFO_PATCH_PATH
+    if not guiinfo_patch.is_file() or sha256(guiinfo_patch) != GUIINFO_PATCH_SHA256:
+        raise RuntimeError("The GUIInfo thread-safety patch is missing or changed.")
+
     build_log = output_dir / "build.log"
     if not build_log.is_file():
         raise RuntimeError("Kodi package build log is missing.")
@@ -76,6 +83,9 @@ def main() -> int:
 
     if MUSIC_PATCH_PATH.name not in build_logs:
         raise RuntimeError("Build log does not confirm the music stop patch was applied.")
+
+    if GUIINFO_PATCH_PATH.name not in build_logs:
+        raise RuntimeError("Build log does not confirm the GUIInfo thread-safety patch was applied.")
 
     pattern = f"build.CoreELEC-Amlogic-ng.arm-*/install_pkg/kodi-{KODI_VERSION}/usr/lib/kodi/kodi.bin"
     candidates = sorted(root.glob(pattern))
@@ -111,6 +121,9 @@ def main() -> int:
         "artwork_patch_sha256": ARTWORK_PATCH_SHA256,
         "music_patch_path": MUSIC_PATCH_PATH.as_posix(),
         "music_patch_sha256": MUSIC_PATCH_SHA256,
+        "guiinfo_patch_path": GUIINFO_PATCH_PATH.as_posix(),
+        "guiinfo_patch_sha256": GUIINFO_PATCH_SHA256,
+        "guiinfo_upstream_commit": "864cb9b8518ffa34f040551cee5efa2d5422a10a",
         "source_overrides": {
             "rtmpdump": {
                 "version": "f1b83c10d8beb43fcc70a6e88cf4325499f25857",

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly EXPECTED_BRANCH="codex/fix-playback-state-artwork"
+readonly EXPECTED_BRANCH="codex/fix-coreelec-guiinfo-race"
 readonly EXPECTED_COREELEC_BASELINE="8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56"
 readonly EXPECTED_KODI_VERSION="acc0fc66bc6af69c31a93c5d17e36900343263b7"
 readonly EXPECTED_PATCH_SHA256="567336a6fdfcf802f02cf8b0b1295801ed5abfca20a35f13ca1b319b006de127"
@@ -88,3 +88,11 @@ if [[ ! -f "${MUSIC_PATCH_PATH}" ]] || [[ "$(sha256sum "${MUSIC_PATCH_PATH}" | a
   exit 1
 fi
 printf 'Music stop patch SHA256: %s  %s\n' "${MUSIC_PATCH_SHA256}" "${MUSIC_PATCH_PATH}"
+
+readonly GUIINFO_PATCH_PATH="projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-93-guiinfo-thread-safety.patch"
+readonly GUIINFO_PATCH_SHA256="1a13751c5036497b4058988df3809759249459261c3c440f230aeae5297fac7f"
+if [[ ! -f "${GUIINFO_PATCH_PATH}" ]] || [[ "$(sha256sum "${GUIINFO_PATCH_PATH}" | awk '{print $1}')" != "${GUIINFO_PATCH_SHA256}" ]]; then
+  echo "GUIInfo thread-safety patch is missing or changed." >&2
+  exit 1
+fi
+printf 'GUIInfo patch SHA256: %s  %s\n' "${GUIINFO_PATCH_SHA256}" "${GUIINFO_PATCH_PATH}"
