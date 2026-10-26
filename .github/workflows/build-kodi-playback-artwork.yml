@@ -20,7 +20,8 @@ jobs:
       ARCH: arm
       CORE_ELEC_BASELINE: 8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56
       KODI_SOURCE_SHA: acc0fc66bc6af69c31a93c5d17e36900343263b7
-      BUILD_CACHE_PREFIX: coreelec-build-v2-linux-x64-ubuntu22.04-Amlogic-ce-Amlogic-ng-arm-8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56-acc0fc66bc6af69c31a93c5d17e36900343263b7
+      COREELEC_HOST_PORTABLE: "1"
+      BUILD_CACHE_PREFIX: coreelec-build-v3-portable-host-linux-x64-ubuntu22.04-Amlogic-ce-Amlogic-ng-arm-8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56-acc0fc66bc6af69c31a93c5d17e36900343263b7
       COREELEC_TARGET_NAME: armv8a-libreelec-linux-gnueabihf
       CCACHE_MAXSIZE: 1G
       MTWITHLOCKS: "no"
@@ -66,6 +67,7 @@ jobs:
           restore-keys: |
             ${{ env.BUILD_CACHE_PREFIX }}-full-
             ${{ env.BUILD_CACHE_PREFIX }}-ccache-only-
+            coreelec-build-v2-linux-x64-ubuntu22.04-Amlogic-ce-Amlogic-ng-arm-8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56-acc0fc66bc6af69c31a93c5d17e36900343263b7-ccache-only-
 
       - name: Validate and restore build snapshot
         shell: bash
@@ -78,6 +80,10 @@ jobs:
       - name: Verify source, patch, and target
         shell: bash
         run: bash .github/scripts/check-build-inputs.sh 2>&1 | tee artifacts/source-check.log
+
+      - name: Verify portable host and ARM target flags
+        shell: bash
+        run: bash .github/scripts/test-portable-host-flags.sh
 
       - name: Preflight rtmpdump source
         shell: bash

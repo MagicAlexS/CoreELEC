@@ -110,6 +110,21 @@ post_makeinstall_host() {
   rm -fr ${PKG_BUILD}/.${HOST_NAME}/build/temp.*
 
   cp ${PKG_BUILD}/Tools/scripts/reindent.py ${TOOLCHAIN}/lib/${PKG_PYTHON_VERSION}
+
+  # Catch host interpreter/pyexpat CPU or cache corruption before downstream
+  # generators invoke Python to parse XML (notably libxml2).
+  "${TOOLCHAIN}/bin/python" - <<'PY' || die "Host Python XML parser smoke failed before dependency generators."
+import sys
+import xml.sax
+from xml.parsers import expat
+from xml.sax.handler import ContentHandler
+
+source = b'<root><child name="ok"/></root>'
+parser = expat.ParserCreate()
+parser.Parse(source, True)
+xml.sax.parseString(source, ContentHandler())
+print(f"Python {sys.version.split()[0]} XML parser smoke passed: {sys.executable}")
+PY
 }
 
 pre_configure_target() {
