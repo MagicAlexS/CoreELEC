@@ -96,3 +96,11 @@ if [[ ! -f "${GUIINFO_PATCH_PATH}" ]] || [[ "$(sha256sum "${GUIINFO_PATCH_PATH}"
   exit 1
 fi
 printf 'GUIInfo patch SHA256: %s  %s\n' "${GUIINFO_PATCH_SHA256}" "${GUIINFO_PATCH_PATH}"
+
+readonly LIBXML2_GENERATOR_PATCH_PATH="packages/textproc/libxml2/patches/libxml2-0002-Check-python-generator-failure.patch"
+readonly LIBXML2_GENERATOR_PATCH_SHA256="7a8cd4e629ff015c0210ee66ff2fba18332168eaafdbb8119a1075e8d710bbc5"
+if [[ ! -f "${LIBXML2_GENERATOR_PATCH_PATH}" ]] || [[ "$(sha256sum "${LIBXML2_GENERATOR_PATCH_PATH}" | awk '{print $1}')" != "${LIBXML2_GENERATOR_PATCH_SHA256}" ]]; then
+  echo "libxml2 generator diagnostics patch is missing or changed." >&2
+  exit 1
+fi
+printf 'libxml2 generator patch SHA256: %s\n' "${LIBXML2_GENERATOR_PATCH_SHA256}"

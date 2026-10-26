@@ -23,4 +23,11 @@ must verify the running binary hash, media UI transitions, ordinary playback,
 failed music opens and preservation of DVD/artwork behavior. This branch does
 not automatically deploy or publish a release.
 
-Builds run on codex/fix-playback-state-artwork to reuse the existing scoped compiler caches. The cache prefix and the original three patch checksums remain unchanged.
+Builds use codex/fix-playback-state-artwork to restore the existing scoped
+compiler caches; the cache prefix and previous patch checksums remain fixed.
+
+The first GUIInfo build stopped in libxml2:host before compiling Kodi: its
+Python generator had not created libxml2class.py. The dependency patch records
+the generator's status/output and checks the result before reading that file.
+Host bindings remain enabled for itstool; source version/hash and target ABI
+are unchanged. The run-specific cause was not visible in the original log.

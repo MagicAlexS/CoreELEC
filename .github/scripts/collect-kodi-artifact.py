@@ -33,6 +33,9 @@ MUSIC_PATCH_SHA256 = "9c618be2fc50456f8883122684cdd340e19b77aa8b213e97e57653c196
 GUIINFO_PATCH_PATH = Path("projects/Amlogic-ce/devices/Amlogic-ng/patches/kodi/kodi-93-guiinfo-thread-safety.patch")
 GUIINFO_PATCH_SHA256 = "1a13751c5036497b4058988df3809759249459261c3c440f230aeae5297fac7f"
 
+LIBXML2_GENERATOR_PATCH_PATH = Path("packages/textproc/libxml2/patches/libxml2-0002-Check-python-generator-failure.patch")
+LIBXML2_GENERATOR_PATCH_SHA256 = "7a8cd4e629ff015c0210ee66ff2fba18332168eaafdbb8119a1075e8d710bbc5"
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -67,6 +70,10 @@ def main() -> int:
     if not guiinfo_patch.is_file() or sha256(guiinfo_patch) != GUIINFO_PATCH_SHA256:
         raise RuntimeError("The GUIInfo thread-safety patch is missing or changed.")
 
+    libxml2_patch = root / LIBXML2_GENERATOR_PATCH_PATH
+    if not libxml2_patch.is_file() or sha256(libxml2_patch) != LIBXML2_GENERATOR_PATCH_SHA256:
+        raise RuntimeError("The libxml2 generator diagnostics patch is missing or changed.")
+
     build_log = output_dir / "build.log"
     if not build_log.is_file():
         raise RuntimeError("Kodi package build log is missing.")
@@ -86,6 +93,9 @@ def main() -> int:
 
     if GUIINFO_PATCH_PATH.name not in build_logs:
         raise RuntimeError("Build log does not confirm the GUIInfo thread-safety patch was applied.")
+
+    if LIBXML2_GENERATOR_PATCH_PATH.name not in build_logs:
+        raise RuntimeError("Build log does not confirm the libxml2 diagnostics patch was applied.")
 
     pattern = f"build.CoreELEC-Amlogic-ng.arm-*/install_pkg/kodi-{KODI_VERSION}/usr/lib/kodi/kodi.bin"
     candidates = sorted(root.glob(pattern))
@@ -124,6 +134,8 @@ def main() -> int:
         "guiinfo_patch_path": GUIINFO_PATCH_PATH.as_posix(),
         "guiinfo_patch_sha256": GUIINFO_PATCH_SHA256,
         "guiinfo_upstream_commit": "864cb9b8518ffa34f040551cee5efa2d5422a10a",
+        "libxml2_generator_patch_path": LIBXML2_GENERATOR_PATCH_PATH.as_posix(),
+        "libxml2_generator_patch_sha256": LIBXML2_GENERATOR_PATCH_SHA256,
         "source_overrides": {
             "rtmpdump": {
                 "version": "f1b83c10d8beb43fcc70a6e88cf4325499f25857",

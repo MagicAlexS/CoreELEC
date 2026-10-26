@@ -1,0 +1,36 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -559,7 +559,32 @@
+ 		${CMAKE_CURRENT_SOURCE_DIR}/python/libxml2-python-api.xml
+ 		WORKING_DIRECTORY
+ 		${CMAKE_CURRENT_BINARY_DIR}
+-	)
++		RESULT_VARIABLE LIBXML2_PYTHON_GENERATOR_RESULT
++		OUTPUT_VARIABLE LIBXML2_PYTHON_GENERATOR_STDOUT
++		ERROR_VARIABLE LIBXML2_PYTHON_GENERATOR_STDERR
++	)
++	if(NOT "${LIBXML2_PYTHON_GENERATOR_RESULT}" STREQUAL "0")
++		message(FATAL_ERROR
++			"libxml2 Python wrapper generation failed.\n"
++			"Python executable: ${Python_EXECUTABLE}\n"
++			"Generator: ${CMAKE_CURRENT_SOURCE_DIR}/python/generator.py\n"
++			"Input API: ${CMAKE_CURRENT_SOURCE_DIR}/doc/libxml2-api.xml\n"
++			"Python API: ${CMAKE_CURRENT_SOURCE_DIR}/python/libxml2-python-api.xml\n"
++			"Working directory: ${CMAKE_CURRENT_BINARY_DIR}\n"
++			"Result: ${LIBXML2_PYTHON_GENERATOR_RESULT}\n"
++			"stdout:\n${LIBXML2_PYTHON_GENERATOR_STDOUT}\n"
++			"stderr:\n${LIBXML2_PYTHON_GENERATOR_STDERR}"
++		)
++	endif()
++	if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/libxml2class.py")
++		message(FATAL_ERROR
++			"libxml2 Python wrapper generator exited successfully but did not create ${CMAKE_CURRENT_BINARY_DIR}/libxml2class.py.\n"
++			"Python executable: ${Python_EXECUTABLE}\n"
++			"Working directory: ${CMAKE_CURRENT_BINARY_DIR}\n"
++			"stdout:\n${LIBXML2_PYTHON_GENERATOR_STDOUT}\n"
++			"stderr:\n${LIBXML2_PYTHON_GENERATOR_STDERR}"
++		)
++	endif()
+ 	file(READ python/libxml.py LIBXML_PY)
+ 	file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/libxml2.py.in "${LIBXML_PY}")
+ 	file(READ ${CMAKE_CURRENT_BINARY_DIR}/libxml2class.py LIBXML2CLASS_PY)
