@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly EXPECTED_BRANCH="codex/fix-coreelec-guiinfo-race"
+readonly EXPECTED_BRANCH="codex/fix-playback-state-artwork"
 readonly EXPECTED_COREELEC_BASELINE="8ae70e7c26a5e6ae59ae6a47f5846bd633ac9f56"
 readonly EXPECTED_KODI_VERSION="acc0fc66bc6af69c31a93c5d17e36900343263b7"
 readonly EXPECTED_PATCH_SHA256="567336a6fdfcf802f02cf8b0b1295801ed5abfca20a35f13ca1b319b006de127"

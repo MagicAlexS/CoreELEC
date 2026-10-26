@@ -3,7 +3,7 @@ name: Build Kodi GUIInfo thread safety fix
 on:
   push:
     branches:
-      - codex/fix-coreelec-guiinfo-race
+      - codex/fix-playback-state-artwork
   workflow_dispatch:
 
 permissions:
