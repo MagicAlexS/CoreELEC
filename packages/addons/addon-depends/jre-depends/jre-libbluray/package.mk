@@ -1,28 +1,15 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2019-present Team LibreELEC (https://libreelec.tv)
 
-. $(get_pkg_directory libbluray)/package.mk
-
+# The main libbluray build now provides both matching BD-J jars.
 PKG_NAME="jre-libbluray"
-PKG_DEPENDS_TARGET+=" apache-ant:host"
-PKG_LONGDESC="libbluray jar for BD-J menus"
-PKG_URL=""
-PKG_DEPENDS_UNPACK+=" jdk-${MACHINE_HARDWARE_NAME}-zulu libbluray"
-PKG_PATCH_DIRS+=" $(get_pkg_directory libbluray)/patches"
-PKG_BUILD_FLAGS="-sysroot"
+PKG_VERSION="1.5.0"
+PKG_LICENSE="LGPL"
+PKG_DEPENDS_TARGET="libbluray"
+PKG_LONGDESC="Matching libbluray Java implementation for the JRE addon"
+PKG_TOOLCHAIN="manual"
 
-unpack() {
-  mkdir -p ${PKG_BUILD}
-  tar --strip-components=1 -xf ${SOURCES}/${PKG_NAME:4}/${PKG_NAME:4}-${PKG_VERSION}.tar.bz2 -C ${PKG_BUILD}
-}
-
-pre_configure_target() {
-  export JAVA_HOME="$(get_build_dir jdk-${MACHINE_HARDWARE_NAME}-zulu)"
-
-  # build also jar
-  PKG_CONFIGURE_OPTS_TARGET="${PKG_CONFIGURE_OPTS_TARGET/disable-bdjava-jar/enable-bdjava-jar}"
-}
-
-make_target() {
-  make all-local
+makeinstall_target() {
+  mkdir -p "${INSTALL}/usr/share/java"
+  cp "$(get_install_dir libbluray)"/usr/share/java/*.jar "${INSTALL}/usr/share/java/"
 }

@@ -3,43 +3,32 @@
 # Copyright (C) 2018-present Team LibreELEC (https://libreelec.tv)
 
 PKG_NAME="libbluray"
-PKG_VERSION="1.3.4"
-PKG_SHA256="478ffd68a0f5dde8ef6ca989b7f035b5a0a22c599142e5cd3ff7b03bbebe5f2b"
+PKG_VERSION="1.5.0"
+PKG_SHA256="f676408e91a5d321abf8b8d4dfdae36205c297dab5c54c3ec519639025f474a2"
 PKG_LICENSE="LGPL"
 PKG_SITE="https://www.videolan.org/developers/libbluray.html"
-PKG_URL="http://download.videolan.org/pub/videolan/libbluray/${PKG_VERSION}/${PKG_NAME}-${PKG_VERSION}.tar.bz2"
-PKG_DEPENDS_TARGET="toolchain fontconfig freetype libxml2 libudfread"
-PKG_LONGDESC="libbluray is an open-source library designed for Blu-Ray Discs playback for media players."
-PKG_TOOLCHAIN="autotools"
+PKG_URL="https://download.videolan.org/pub/videolan/libbluray/${PKG_VERSION}/${PKG_NAME}-${PKG_VERSION}.tar.xz"
+PKG_DEPENDS_TARGET="toolchain fontconfig freetype libxml2 libudfread apache-ant:host"
+PKG_DEPENDS_UNPACK="jdk-${MACHINE_HARDWARE_NAME}-zulu"
+PKG_LONGDESC="Blu-ray navigation and BD-J support, with matching Java implementation."
+PKG_TOOLCHAIN="meson"
 
 if [ "${BLURAY_AACS_SUPPORT}" = "yes" ]; then
   PKG_DEPENDS_TARGET+=" libaacs"
 fi
-
 if [ "${BLURAY_BDPLUS_SUPPORT}" = "yes" ]; then
   PKG_DEPENDS_TARGET+=" libbdplus"
 fi
 
-PKG_CONFIGURE_OPTS_TARGET="--disable-werror \
-                           --disable-extra-warnings \
-                           --disable-optimizations \
-                           --disable-examples \
-                           --disable-bdjava-jar \
-                           --disable-doxygen-doc \
-                           --disable-doxygen-dot \
-                           --disable-doxygen-man \
-                           --disable-doxygen-rtf \
-                           --disable-doxygen-xml \
-                           --disable-doxygen-chm \
-                           --disable-doxygen-chi \
-                           --disable-doxygen-html \
-                           --disable-doxygen-ps \
-                           --disable-doxygen-pdf \
-                           --with-freetype \
-                           --with-fontconfig \
-                           --with-libxml2 \
-                           --with-gnu-ld"
+PKG_MESON_OPTS_TARGET="-Denable_docs=false
+                       -Denable_tools=false
+                       -Denable_examples=false
+                       -Dbdj_jar=enabled
+                       -Dfontconfig=enabled
+                       -Dfreetype=enabled
+                       -Dlibxml2=enabled"
 
-post_configure_target() {
-  libtool_remove_rpath libtool
+pre_configure_target() {
+  export JAVA_HOME="$(get_build_dir jdk-${MACHINE_HARDWARE_NAME}-zulu)"
+  export PATH="${JAVA_HOME}/bin:${PATH}"
 }

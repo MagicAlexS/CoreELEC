@@ -2,14 +2,13 @@
 # Copyright (C) 2020-present Team LibreELEC (https://libreelec.tv)
 
 PKG_NAME="libudfread"
-PKG_VERSION="1.1.2"
-PKG_SHA256="2bf16726ac98d093156195bb049a663e07d3323e079c26912546f4e05c77bac5"
+PKG_VERSION="1.2.0"
+PKG_SHA256="bb477cbd4cfbfc7787d9d05b71ee5e70430f5cfebf1297497f7e83547958050f"
 PKG_LICENSE="LGPLv2.1"
 PKG_SITE="https://code.videolan.org/videolan/libudfread"
-PKG_URL="https://code.videolan.org/videolan/${PKG_NAME}/-/archive/${PKG_VERSION}/${PKG_NAME}-${PKG_VERSION}.tar.gz"
+PKG_URL="https://download.videolan.org/pub/videolan/libudfread/${PKG_NAME}-${PKG_VERSION}.tar.xz"
 PKG_DEPENDS_TARGET="toolchain"
 PKG_LONGDESC="UDF reader"
-PKG_TOOLCHAIN="autotools"
+PKG_TOOLCHAIN="meson"
 PKG_BUILD_FLAGS="+pic"
-
-PKG_CONFIGURE_OPTS_TARGET="--enable-static --disable-shared"
+PKG_MESON_OPTS_TARGET="-Ddefault_library=static -Denable_examples=false"
