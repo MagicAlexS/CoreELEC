@@ -1,0 +1,118 @@
+--- a/xbmc/video/dialogs/GUIDialogSubtitleSettings.cpp
++++ b/xbmc/video/dialogs/GUIDialogSubtitleSettings.cpp
+@@ -51,6 +51,46 @@
+ #define SETTING_SUBTITLE_SEARCH                "subtitles.search"
+ #define SETTING_MAKE_DEFAULT                   "audio.makedefault"
+ 
++namespace
++{
++std::string GetSubtitleBrowseDirectory(std::string path)
++{
++  // Disc and archive URLs keep their real source in the encoded hostname.
++  // Unwrap nested bluray://udf:// URLs to the image's containing directory.
++  while (!path.empty())
++  {
++    const CURL url(path);
++    if (!(url.IsProtocol("bluray") || url.IsProtocol("udf") || url.IsProtocol("rar") ||
++          url.IsProtocol("zip")) || url.GetHostName().empty() || url.GetHostName() == path)
++      break;
++    path = url.GetHostName();
++  }
++
++  if (path.empty() || URIUtils::IsPlugin(path))
++    return {};
++
++  const std::string directory = URIUtils::HasSlashAtEnd(path)
++                                    ? path
++                                    : CFileItem(path, false).GetLocalMetadataPath();
++  // GetLocalMetadataPath handles BDMV/index.bdmv and VIDEO_TS.IFO. Also
++  // handle playback paths inside BDMV/PLAYLIST, BDMV/STREAM and BACKUP.
++  std::string ancestor = directory;
++  while (!ancestor.empty())
++  {
++    std::string folder = ancestor;
++    URIUtils::RemoveSlashAtEnd(folder);
++    const std::string name = URIUtils::GetFileName(folder);
++    if (StringUtils::EqualsNoCase(name, "BDMV") || StringUtils::EqualsNoCase(name, "VIDEO_TS"))
++      return URIUtils::GetParentPath(ancestor);
++    const std::string parent = URIUtils::GetParentPath(ancestor);
++    if (parent == ancestor)
++      break;
++    ancestor = parent;
++  }
++  return directory;
++}
++} // namespace
++
+ CGUIDialogSubtitleSettings::CGUIDialogSubtitleSettings()
+   : CGUIDialogSettingsManualBase(WINDOW_DIALOG_SUBTITLE_OSD_SETTINGS, "DialogSettings.xml")
+ { }
+@@ -137,6 +177,7 @@
+   {
+     strPath = dynPath;
+   }
++  strPath = GetSubtitleBrowseDirectory(strPath);
+ 
+   std::string strMask =
+       ".utf|.utf8|.utf-8|.sub|.srt|.smi|.rt|.txt|.ssa|.aqt|.jss|.ass|.vtt|.idx|.zip|.sup";
+@@ -158,8 +199,13 @@
+     paths.push_back(CServiceBroker::GetSettingsComponent()->GetSettings()->GetString(CSettings::SETTING_SUBTITLES_CUSTOMPATH));
+     share.FromNameAndPaths("video",g_localizeStrings.Get(21367),paths);
+     shares.push_back(share);
+-    strPath = share.strPath;
+-    URIUtils::AddSlashAtEnd(strPath);
++    // Keep the movie directory as the initial location. The configured
++    // subtitle directory remains available as an additional source.
++    if (strPath.empty())
++    {
++      strPath = share.strPath;
++      URIUtils::AddSlashAtEnd(strPath);
++    }
+   }
+ 
+   if (CGUIDialogFileBrowser::ShowAndGetFile(shares, strMask, g_localizeStrings.Get(293), strPath, false, true)) // "subtitles"
+--- a/xbmc/GUIInfoManager.cpp
++++ b/xbmc/GUIInfoManager.cpp
+@@ -4053,6 +4053,7 @@
+                                   { "uniqueid",         VIDEOPLAYER_UNIQUEID },
+                                   { "tvshowdbid",       VIDEOPLAYER_TVSHOWDBID },
+                                   { "audiostreamcount", VIDEOPLAYER_AUDIOSTREAMCOUNT },
++                                  { "subtitlecount",    VIDEOPLAYER_SUBTITLECOUNT },
+                                   { "hdrtype",          VIDEOPLAYER_HDR_TYPE },
+                                   { "art",              VIDEOPLAYER_ART},
+                                   { "videoversionname", VIDEOPLAYER_VIDEOVERSION_NAME},
+--- a/xbmc/guilib/guiinfo/GUIInfoLabels.h
++++ b/xbmc/guilib/guiinfo/GUIInfoLabels.h
+@@ -278,6 +278,7 @@
+ #define VIDEOPLAYER_UNIQUEID          294
+ #define VIDEOPLAYER_AUDIOSTREAMCOUNT  295
+ #define VIDEOPLAYER_VIDEOVERSION_NAME 296
++#define VIDEOPLAYER_SUBTITLECOUNT     297
+ 
+ // Videoplayer infobools
+ #define VIDEOPLAYER_HASSUBTITLES      300
+--- a/xbmc/guilib/guiinfo/VideoGUIInfo.cpp
++++ b/xbmc/guilib/guiinfo/VideoGUIInfo.cpp
+@@ -97,6 +97,12 @@
+ 
+ bool CVideoGUIInfo::GetLabel(std::string& value, const CFileItem *item, int contextWindow, const CGUIInfo &info, std::string *fallback) const
+ {
++  if (info.m_info == VIDEOPLAYER_SUBTITLECOUNT)
++  {
++    value = std::to_string(m_appPlayer->GetSubtitleCount());
++    return true;
++  }
++
+   // For videoplayer "offset" and "position" info labels check playlist
+   if (info.GetData1() && ((info.m_info >= VIDEOPLAYER_OFFSET_POSITION_FIRST &&
+       info.m_info <= VIDEOPLAYER_OFFSET_POSITION_LAST) ||
+@@ -759,6 +765,9 @@
+     case VIDEOPLAYER_AUDIOSTREAMCOUNT:
+       value = m_appPlayer->GetAudioStreamCount();
+       return true;
++    case VIDEOPLAYER_SUBTITLECOUNT:
++      value = m_appPlayer->GetSubtitleCount();
++      return true;
+ 
+     default:
+       break;
