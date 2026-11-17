@@ -1,0 +1,423 @@
+Subject: [PATCH] Bluray: separate navigation modes and interrupt buffered user seeks
+
+--- a/xbmc/application/Application.cpp
++++ b/xbmc/application/Application.cpp
+@@ -976,6 +976,19 @@
+       return OnAction(CAction(ACTION_PLAYER_PLAY));
+   }
+ 
++  // Fullscreen's default Back/OSD handlers run before the normal player action
++  // dispatch. Give active Blu-ray navigation first refusal, otherwise Back
++  // leaves fullscreen and OSD opens without suspending the disc graphics.
++  const auto& windowManager = CServiceBroker::GetGUI()->GetWindowManager();
++  if (appPlayer->IsInMenu() &&
++      (CurrentFileItem().IsBluray() || URIUtils::IsBluray(CurrentFileItem().GetDynPath())) &&
++      windowManager.GetActiveWindow() == WINDOW_FULLSCREEN_VIDEO &&
++      !windowManager.HasModalDialog(true) &&
++      (action.GetID() == ACTION_NAV_BACK || action.GetID() == ACTION_PREVIOUS_MENU ||
++       action.GetID() == ACTION_SHOW_OSD || action.GetID() == ACTION_TRIGGER_OSD) &&
++      appPlayer->OnAction(action))
++    return true;
++
+   //if the action would start or stop inertial scrolling
+   //by gesture - bypass the normal OnAction handler of current window
+   if( !m_pInertialScrollingHandler->CheckForInertialScrolling(&action) )
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -441,14 +441,16 @@
+ 
+   // An explicit menu/seek action supersedes a buffered title end. Flush the old
+   // packets, otherwise choosing Play would wait for the rest of the menu audio.
+-  if (m_titleEndPending &&
++  if ((m_titleEndPending || m_userNavigationRequest) &&
+       (m_event.event == BD_EVENT_SEEK || m_event.event == BD_EVENT_TITLE ||
+        m_event.event == BD_EVENT_PLAYLIST || m_event.event == BD_EVENT_PLAYITEM ||
+        m_event.event == BD_EVENT_CHAPTER ||
+        m_event.event == BD_EVENT_PLAYLIST_STOP))
+   {
+-    CLog::Log(LOGINFO, "CDVDInputStreamBluray - navigation supersedes held title end");
++    CLog::Log(LOGINFO, "CDVDInputStreamBluray - flushing buffered playback for user navigation");
+     m_titleEndPending = false;
++    m_userNavigationRequest = false;
++    m_navigationInterrupted = true;
+     m_hold = HOLD_HELD;
+     if (m_event.event != BD_EVENT_PLAYLIST_STOP)
+       m_player->OnDiscNavResult(nullptr, BD_EVENT_PLAYLIST_STOP);
+@@ -878,7 +880,7 @@
+   }
+ 
+   m_player->OnDiscNavResult(static_cast<void*>(&group), BD_EVENT_MENU_OVERLAY);
+-  m_hasOverlay = true;
++  m_hasOverlay = !group->m_overlays.empty();
+ #endif
+ }
+ 
+@@ -918,6 +920,7 @@
+   if (ov->img && ov->cmd == BD_OVERLAY_DRAW)
+   {
+     SOverlay overlay = std::make_shared<CDVDOverlayImage>();
++    overlay->SetDiscMenu(true);
+ 
+     if (ov->palette)
+     {
+@@ -981,6 +984,7 @@
+   if (ov->argb && ov->cmd == BD_ARGB_OVERLAY_DRAW)
+   {
+     SOverlay overlay = std::make_shared<CDVDOverlayImage>();
++    overlay->SetDiscMenu(true);
+ 
+     overlay->palette.clear();
+     overlay->linesize = ov->w * 4;
+@@ -1166,7 +1170,11 @@
+ 
+ bool CDVDInputStreamBluray::SelectStreamByPid(int pid, bool audio, bool enable)
+ {
+-  if (!m_navmode || !m_bd || !m_clip || pid < 0)
++  if (!m_navmode || !m_bd || pid < 0)
++    return false;
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++  if (!m_clip)
+     return false;
+ 
+   const BLURAY_STREAM_INFO* streams =
+@@ -1289,6 +1297,7 @@
+   // END remains represented by m_titleEndPending until NextStream releases it.
+   ProcessEvent();
+   int ret = bd_user_input(m_bd, -1, vk);
++  m_userNavigationRequest = vk == BD_VK_ENTER && ret > 0;
+   if (ret < 0)
+   {
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::UserInput - user input failed");
+@@ -1299,7 +1308,7 @@
+     // Poll without reading stream bytes: a page-only change must preserve the
+     // current demuxer and buffered audio, whereas navigation events below
+     // supersede the held EOF and flush the old title.
+-    if (m_titleEndPending && vk == BD_VK_ENTER && ret > 0)
++    if (vk == BD_VK_ENTER && ret > 0)
+     {
+       CLog::Log(LOGINFO, "CDVDInputStreamBluray - polling activated menu commands during title drain");
+       for (int i = 0; i < 100; ++i)
+@@ -1315,6 +1324,7 @@
+     while (bd_get_event(m_bd, &m_event))
+       ProcessEvent();
+   }
++  m_userNavigationRequest = false;
+ }
+ 
+ bool CDVDInputStreamBluray::MouseMove(const CPoint &point)
+@@ -1367,9 +1377,11 @@
+   while (bd_get_event(m_bd, &m_event))
+     ProcessEvent();
+ 
++  bool rootRequest = false;
+   int ret = bd_user_input(m_bd, -1, BD_VK_POPUP);
+   if (ret < 0)
+   {
++    rootRequest = true;
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OnMenu - trying root menu");
+     // ROOT_MENU is bd_menu_call internally: zero means it was not accepted.
+     ret = bd_menu_call(m_bd, -1);
+@@ -1377,12 +1389,13 @@
+       return false;
+   }
+ 
++  m_userNavigationRequest = rootRequest && ret > 0;
+   while (bd_get_event(m_bd, &m_event))
+     ProcessEvent();
+ 
+-  // A menu button can install HDMV VM commands while input is held at EOF.
+-  // Only poll an activation, never resume the default end program for a no-op.
+-  if (m_titleEndPending && ret > 0)
++  // A root-menu call installs VM navigation. A graphics-only popup/reopen must
++  // not resume the buffered title-end program or alter the playback position.
++  if (rootRequest && ret > 0)
+   {
+     for (int i = 0; i < 100; ++i)
+     {
+@@ -1391,8 +1404,36 @@
+       ProcessEvent();
+     }
+   }
++  m_userNavigationRequest = false;
+   CLog::Log(LOGINFO, "CDVDInputStreamBluray::OnMenu - menu request accepted ({})", ret);
+   return true;
++}
++
++bool CDVDInputStreamBluray::CloseMenu()
++{
++  if (!m_bd || !m_navmode)
++    return false;
++  const int ret = bd_menu_close(m_bd);
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++  CLog::Log(LOGINFO, "CDVDInputStreamBluray::CloseMenu - close result {}", ret);
++  return ret > 0 || !IsInMenu();
++}
++
++bool CDVDInputStreamBluray::NavigateBack()
++{
++  if (!m_bd || !m_navmode || !IsInMenu())
++    return false;
++
++  // Back is a graphics-only operation. Do not call bd_read_ext here: polling
++  // the VM could advance a buffered title end instead of only returning a page.
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++  const int ret = bd_menu_back(m_bd);
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++  CLog::Log(LOGINFO, "CDVDInputStreamBluray::NavigateBack - page result {}", ret);
++  return ret > 0;
+ }
+ 
+ bool CDVDInputStreamBluray::IsInMenu()
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -88,6 +88,14 @@
+   * \return true if the menu is successfully opened, false otherwise
+   */
+   bool OnMenu() override;
++  bool NavigateBack();
++  bool CloseMenu();
++  bool ConsumeNavigationInterrupt()
++  {
++    const bool interrupted = m_navigationInterrupted;
++    m_navigationInterrupted = false;
++    return interrupted;
++  }
+   void OnBack() override
+   {
+     if(IsInMenu())
+@@ -188,6 +196,8 @@
+   bool m_hasOverlay = false;
+   bool m_navmode = false;
+   bool m_titleEndPending = false;
++  bool m_userNavigationRequest = false;
++  bool m_navigationInterrupted = false;
+   int m_dispTimeBeforeRead = 0;
+   int                 m_nTitles = -1;
+   std::string         m_root;
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -728,6 +728,9 @@
+     StopThread();
+   }
+ 
++  m_discMenuSuspended = false;
++  m_renderManager.SetDiscMenuVisible(true);
++
+   m_Edl.Clear();
+   CServiceBroker::GetDataCacheCore().Reset();
+   m_processInfo->SetDataCache(&CServiceBroker::GetDataCacheCore());
+@@ -758,6 +761,9 @@
+ 
+ bool CVideoPlayer::OpenInputStream()
+ {
++  m_discMenuSuspended = false;
++  m_renderManager.SetDiscMenuVisible(true);
++
+   if (m_pInputStream.use_count() > 1)
+     throw std::runtime_error("m_pInputStream reference count is greater than 1");
+   m_pInputStream.reset();
+@@ -1550,8 +1556,14 @@
+ 
+         SetCaching(CACHESTATE_DONE);
+         CLog::Log(LOGINFO, "VideoPlayer: next stream, wait for old streams to be finished");
+-        CloseStream(m_CurrentAudio, true);
+-        CloseStream(m_CurrentVideo, true);
++        bool waitForBuffers = true;
++#if defined(HAVE_LIBBLURAY)
++        if (const auto bluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++            bluray && bluray->ConsumeNavigationInterrupt())
++          waitForBuffers = false;
++#endif
++        CloseStream(m_CurrentAudio, waitForBuffers);
++        CloseStream(m_CurrentVideo, waitForBuffers);
+ 
+         m_CurrentAudio.Clear();
+         m_CurrentVideo.Clear();
+@@ -4484,6 +4496,29 @@
+   } while (false)
+ 
+   std::shared_ptr<CDVDInputStream::IMenus> pMenus = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream);
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++  const bool isBlurayNavigation = bluray && bluray->IsNavigationMode();
++#else
++  const bool isBlurayNavigation = false;
++#endif
++
++  if (isBlurayNavigation && pMenus && pMenus->IsInMenu() && !m_discMenuSuspended &&
++      (action.GetID() == ACTION_SHOW_OSD || action.GetID() == ACTION_TRIGGER_OSD))
++  {
++    THREAD_ACTION(action);
++#if defined(HAVE_LIBBLURAY)
++    if (bluray)
++      bluray->CloseMenu();
++#endif
++    m_discMenuSuspended = true;
++    m_renderManager.SetDiscMenuVisible(false);
++    UpdatePlayState(0);
++    CServiceBroker::GetAppMessenger()->PostMsg(
++        TMSG_GUI_ACTION, WINDOW_INVALID, -1, static_cast<void*>(new CAction(ACTION_SHOW_OSD)));
++    return true;
++  }
++
+   if (pMenus)
+   {
+     if (m_dvd.state == DVDSTATE_STILL && m_dvd.iDVDStillTime != 0ms &&
+@@ -4533,6 +4568,31 @@
+     case ACTION_SHOW_VIDEOMENU:   // start button
+       {
+         THREAD_ACTION(action);
++        if (isBlurayNavigation && pMenus->IsInMenu() && !m_discMenuSuspended)
++        {
++#if defined(HAVE_LIBBLURAY)
++          if (bluray)
++            bluray->CloseMenu();
++#endif
++          m_discMenuSuspended = true;
++          m_renderManager.SetDiscMenuVisible(false);
++          UpdatePlayState(0);
++          return true;
++        }
++
++        if (isBlurayNavigation)
++        {
++          m_discMenuSuspended = false;
++          m_renderManager.SetDiscMenuVisible(true);
++          if (pMenus->IsInMenu())
++          {
++            UpdatePlayState(0);
++            CGUIMessage msg(GUI_MSG_VIDEO_MENU_STARTED, 0, 0);
++            CServiceBroker::GetGUI()->GetWindowManager().SendThreadMessage(msg);
++            return true;
++          }
++        }
++
+         CLog::LogF(LOGDEBUG, "Trying to go to the menu");
+         if (pMenus->OnMenu())
+         {
+@@ -4551,7 +4611,7 @@
+       break;
+     }
+ 
+-    if (pMenus->IsInMenu())
++    if (IsInMenuInternal())
+     {
+       switch (action.GetID())
+       {
+@@ -4580,6 +4640,19 @@
+         {
+           THREAD_ACTION(action);
+           CLog::Log(LOGDEBUG, " - menu back");
++#if defined(HAVE_LIBBLURAY)
++          if (action.GetID() == ACTION_NAV_BACK && isBlurayNavigation && bluray)
++          {
++            if (bluray->NavigateBack())
++              return true;
++
++            bluray->CloseMenu();
++            m_discMenuSuspended = true;
++            m_renderManager.SetDiscMenuVisible(false);
++            UpdatePlayState(0);
++            return true;
++          }
++#endif
+           pMenus->OnBack();
+         }
+         break;
+@@ -4632,6 +4705,19 @@
+               return true;
+             else
+             {
++#if defined(HAVE_LIBBLURAY)
++              if (isBlurayNavigation && bluray && !m_discMenuSuspended)
++              {
++                bluray->CloseMenu();
++                m_discMenuSuspended = true;
++                m_renderManager.SetDiscMenuVisible(false);
++                UpdatePlayState(0);
++                CServiceBroker::GetAppMessenger()->PostMsg(
++                    TMSG_GUI_ACTION, WINDOW_INVALID, -1,
++                    static_cast<void*>(new CAction(ACTION_SHOW_OSD)));
++                return true;
++              }
++#endif
+               CServiceBroker::GetAppMessenger()->PostMsg(
+                   TMSG_GUI_ACTION, WINDOW_INVALID, -1,
+                   static_cast<void*>(new CAction(ACTION_TRIGGER_OSD)));
+@@ -4731,6 +4817,10 @@
+ 
+ bool CVideoPlayer::IsInMenuInternal() const
+ {
++  if (m_discMenuSuspended && m_pInputStream &&
++      m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
++    return false;
++
+   std::shared_ptr<CDVDInputStream::IMenus> pStream = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream);
+   if (pStream)
+   {
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -546,6 +546,7 @@
+   CDVDOverlayContainer m_overlayContainer;
+ 
+   std::shared_ptr<CDVDInputStream> m_pInputStream;
++  std::atomic<bool> m_discMenuSuspended{false};
+   std::unique_ptr<CDVDDemux> m_pDemuxer;
+   std::shared_ptr<CDVDDemux> m_pSubtitleDemuxer;
+   std::unordered_map<int64_t, std::shared_ptr<CDVDDemux>> m_subtitleDemuxerMap;
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+@@ -65,6 +65,12 @@
+   m_buffers[index].push_back(e);
+ }
+ 
++void CRenderer::SetDiscMenuVisible(bool visible)
++{
++  std::unique_lock<CCriticalSection> lock(m_section);
++  m_discMenuVisible = visible;
++}
++
+ void CRenderer::Release(std::vector<SElement>& list)
+ {
+   list.clear();
+@@ -145,7 +151,7 @@
+   std::vector<SElement>& list = m_buffers[idx];
+   for(std::vector<SElement>::iterator it = list.begin(); it != list.end(); ++it)
+   {
+-    if (it->overlay_dvd)
++    if (it->overlay_dvd && (m_discMenuVisible || !it->overlay_dvd->IsDiscMenu()))
+     {
+       std::shared_ptr<COverlay> o = Convert(*(it->overlay_dvd), it->pts);
+ 
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+@@ -102,6 +102,7 @@
+     void Notify(const Observable& obs, const ObservableMessage msg) override;
+ 
+     void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, int index);
++    void SetDiscMenuVisible(bool visible);
+     virtual void Render(int idx);
+ 
+     /*!
+@@ -180,6 +181,7 @@
+     };
+ 
+     CCriticalSection m_section;
++    bool m_discMenuVisible{true};
+     std::vector<SElement> m_buffers[NUM_BUFFERS];
+     std::map<unsigned int, std::shared_ptr<COverlay>> m_textureCache;
+     static unsigned int m_textureid;
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -98,6 +98,7 @@
+   bool Configure(const VideoPicture& picture, float fps, unsigned int orientation, int buffers = 0);
+   bool AddVideoPicture(const VideoPicture& picture, volatile std::atomic_bool& bStop, EINTERLACEMETHOD deintMethod, bool wait);
+   void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts);
++  void SetDiscMenuVisible(bool visible) { m_overlays.SetDiscMenuVisible(visible); }
+   void ShowVideo(bool enable);
+ 
+   /**

@@ -1,0 +1,263 @@
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlay.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlay.h
+@@ -40,6 +40,7 @@
+     m_enableTextAlign = false;
+     m_overlayContainerFlushable = true;
+     m_setForcedMargins = false;
++    m_discMenu = false;
+   }
+ 
+   CDVDOverlay(const CDVDOverlay& src) : std::enable_shared_from_this<CDVDOverlay>(src)
+@@ -54,6 +55,7 @@
+     m_enableTextAlign = src.m_enableTextAlign;
+     m_overlayContainerFlushable = src.m_overlayContainerFlushable;
+     m_setForcedMargins = src.m_setForcedMargins;
++    m_discMenu = src.m_discMenu;
+   }
+ 
+   virtual ~CDVDOverlay() = default;
+@@ -99,6 +101,16 @@
+    */
+   bool IsForcedMargins() const { return m_setForcedMargins; }
+ 
++  /*
++   * \brief Mark the overlay as a disc menu drawn by the input stream rather than a subtitle.
++   */
++  void SetDiscMenu(bool discMenu) { m_discMenu = discMenu; }
++
++  /*
++   * \brief Return true if the overlay is a disc menu drawn by the input stream.
++   */
++  bool IsDiscMenu() const { return m_discMenu; }
++
+   double iPTSStartTime;
+   double iPTSStopTime;
+   bool bForced; // display, no matter what
+@@ -111,6 +123,7 @@
+   bool m_enableTextAlign;
+   bool m_overlayContainerFlushable;
+   bool m_setForcedMargins;
++  bool m_discMenu;
+ };
+ 
+ using VecOverlays = std::vector<std::shared_ptr<CDVDOverlay>>;
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -600,6 +600,8 @@
+     m_menu = (m_event.param != 0);
+     if (!m_menu)
+       m_isInMainMenu = false;
++    else
++      m_player->OnDiscNavResult(nullptr, BD_EVENT_MENU);
+     break;
+ 
+   case BD_EVENT_IDLE:
+@@ -772,6 +774,8 @@
+     plane.o.clear();
+   auto group = std::make_shared<CDVDOverlayGroup>();
+   group->bForced = true;
++  group->SetDiscMenu(true);
++  group->SetOverlayContainerFlushable(false);
+   m_player->OnDiscNavResult(static_cast<void*>(&group), BD_EVENT_MENU_OVERLAY);
+   m_hasOverlay = false;
+ #endif
+@@ -832,6 +836,8 @@
+   group->bForced       = true;
+   group->iPTSStartTime = static_cast<double>(pts);
+   group->iPTSStopTime  = 0;
++  group->SetDiscMenu(true);
++  group->SetOverlayContainerFlushable(false);
+ 
+   for(SPlane& plane : m_planes)
+   {
+@@ -945,11 +951,13 @@
+     SOverlay overlay = std::make_shared<CDVDOverlayImage>();
+ 
+     overlay->palette.clear();
+-    size_t bytes = static_cast<size_t>(ov->stride * ov->h * 4);
+-    overlay->pixels.resize(bytes);
+-    memcpy(overlay->pixels.data(), ov->argb, bytes);
+-
+-    overlay->linesize = ov->stride * 4;
++    overlay->linesize = ov->w * 4;
++    overlay->pixels.resize(static_cast<size_t>(overlay->linesize) * ov->h);
++
++    // argb points into libbluray's full width image, so the last line's stride runs past its end
++    for (int row = 0; row < ov->h; ++row)
++      memcpy(overlay->pixels.data() + static_cast<size_t>(row) * overlay->linesize,
++             ov->argb + static_cast<size_t>(row) * ov->stride, overlay->linesize);
+     overlay->x = ov->x;
+     overlay->y = ov->y;
+     overlay->height = ov->h;
+--- a/xbmc/cores/VideoPlayer/DVDOverlayContainer.cpp
++++ b/xbmc/cores/VideoPlayer/DVDOverlayContainer.cpp
+@@ -11,6 +11,7 @@
+ #include "DVDCodecs/Overlay/DVDOverlay.h"
+ #include "DVDInputStreams/DVDInputStreamNavigator.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -31,6 +32,8 @@
+   for(int i = m_overlays.size();i>0;)
+   {
+     i--;
++    if (m_overlays[i]->IsDiscMenu() != pOverlay->IsDiscMenu())
++      continue;
+     if(m_overlays[i]->iPTSStopTime)
+     {
+       if(!m_overlays[i]->replace)
+@@ -43,7 +46,13 @@
+       m_overlays[i]->iPTSStopTime = pOverlay->iPTSStartTime;
+   }
+ 
+-  m_overlays.emplace_back(pOverlay);
++  // Overlays are drawn in container order, and disc menus belong above subtitles
++  auto position = m_overlays.end();
++  if (!pOverlay->IsDiscMenu())
++    position =
++        std::find_if(m_overlays.begin(), m_overlays.end(),
++                     [](const auto& overlay) { return overlay->IsDiscMenu(); });
++  m_overlays.insert(position, pOverlay);
+ }
+ 
+ VecOverlays* CDVDOverlayContainer::GetOverlays()
+@@ -85,7 +94,9 @@
+       while (!bNewer && ++it2 != m_overlays.end())
+       {
+         const std::shared_ptr<CDVDOverlay>& pOverlay2 = *it2;
+-        if (pOverlay2->bForced && pOverlay2->iPTSStartTime <= pts) bNewer = true;
++        if (pOverlay2->bForced && pOverlay2->IsDiscMenu() == pOverlay->IsDiscMenu() &&
++            pOverlay2->iPTSStartTime <= pts)
++          bNewer = true;
+       }
+ 
+       if (bNewer)
+@@ -117,9 +128,27 @@
+   m_overlays.clear();
+ }
+ 
++void CDVDOverlayContainer::ClearSubtitles()
++{
++  std::unique_lock<CCriticalSection> lock(*this);
++  auto newEnd = std::remove_if(m_overlays.begin(), m_overlays.end(),
++                               [](const std::shared_ptr<CDVDOverlay>& ov) {
++                                 return !ov->IsDiscMenu();
++                               });
++  m_overlays.erase(newEnd, m_overlays.end());
++}
++
+ size_t CDVDOverlayContainer::GetSize()
+ {
+   return m_overlays.size();
++}
++
++size_t CDVDOverlayContainer::GetSubtitleSize()
++{
++  std::unique_lock<CCriticalSection> lock(*this);
++  return static_cast<size_t>(std::count_if(
++      m_overlays.begin(), m_overlays.end(),
++      [](const std::shared_ptr<CDVDOverlay>& ov) { return !ov->IsDiscMenu(); }));
+ }
+ 
+ bool CDVDOverlayContainer::ContainsOverlayType(DVDOverlayType type)
+--- a/xbmc/cores/VideoPlayer/DVDOverlayContainer.h
++++ b/xbmc/cores/VideoPlayer/DVDOverlayContainer.h
+@@ -41,12 +41,18 @@
+   void Clear(); // clear the fifo and delete all overlays
+ 
+   /*
++   * \brief Delete all overlays except disc menus, which are not redrawn until they change.
++   */
++  void ClearSubtitles();
++
++  /*
+    * \brief Flush the overlays.
+    */
+   void Flush();
+ 
+   void CleanUp(double pts); // validates all overlays against current pts
+   size_t GetSize();
++  size_t GetSubtitleSize(); // number of overlays that are not disc menus
+ 
+   void UpdateOverlayInfo(const std::shared_ptr<CDVDInputStreamNavigator>& pStream,
+                          CDVDDemuxSPU* pSpu,
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -45,6 +45,7 @@
+ #include "guilib/StereoscopicsManager.h"
+ #include "input/actions/Action.h"
+ #include "input/actions/ActionIDs.h"
++#include "interfaces/AnnouncementManager.h"
+ #include "messaging/ApplicationMessenger.h"
+ #include "settings/AdvancedSettings.h"
+ #include "settings/Settings.h"
+@@ -760,6 +761,9 @@
+   if (m_pInputStream.use_count() > 1)
+     throw std::runtime_error("m_pInputStream reference count is greater than 1");
+   m_pInputStream.reset();
++
++  // Flushes keep disc menu overlays, and the closed input stream can no longer remove them
++  m_overlayContainer.Clear();
+ 
+   CLog::Log(LOGINFO, "Creating InputStream");
+ 
+@@ -2560,9 +2564,10 @@
+   CloseStream(m_CurrentAudioID3, !m_bAbortRequest);
+   // the generalization principle was abused for subtitle player. actually it is not a stream player like
+   // video and audio. subtitle player does not run on its own thread, hence waitForBuffers makes
+-  // no sense here. waitForBuffers is abused to clear overlay container (false clears container)
++  // no sense here. waitForBuffers is abused to clear subtitle overlays (false clears them)
+   // subtitles are added from video player. after video player has finished, overlays have to be cleared.
+-  CloseStream(m_CurrentSubtitle, false);  // clear overlay container
++  CloseStream(m_CurrentSubtitle, false);
++  m_overlayContainer.Clear();
+ 
+   CServiceBroker::GetWinSystem()->UnregisterRenderLoop(this);
+ 
+@@ -4106,6 +4111,9 @@
+   {
+     switch (iMessage)
+     {
++    case BD_EVENT_MENU:
++      CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::Player, "OnMenu");
++      break;
+     case BD_EVENT_MENU_OVERLAY:
+       m_overlayContainer.ProcessAndAddOverlayIfValid(
+           *static_cast<std::shared_ptr<CDVDOverlay>*>(pData));
+--- a/xbmc/cores/VideoPlayer/VideoPlayerSubtitle.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerSubtitle.cpp
+@@ -168,7 +168,7 @@
+   m_dvdspus.FlushCurrentPacket();
+ 
+   if (!bWaitForBuffers)
+-    m_pOverlayContainer->Clear();
++    m_pOverlayContainer->ClearSubtitles();
+ }
+ 
+ void CVideoPlayerSubtitle::Process(double pts, double offset)
+@@ -182,11 +182,11 @@
+ 
+     if (pts + DVD_SEC_TO_TIME(1) < m_lastPts)
+     {
+-      m_pOverlayContainer->Clear();
++      m_pOverlayContainer->ClearSubtitles();
+       m_pSubtitleFileParser->Reset();
+     }
+ 
+-    if(m_pOverlayContainer->GetSize() >= 5)
++    if (m_pOverlayContainer->GetSubtitleSize() >= 5)
+       return;
+ 
+     std::shared_ptr<CDVDOverlay> pOverlay = m_pSubtitleFileParser->Parse(pts);
+@@ -208,6 +208,6 @@
+ bool CVideoPlayerSubtitle::AcceptsData() const
+ {
+   // FIXME : This may still be causing problems + magic number :(
+-  return m_pOverlayContainer->GetSize() < 5;
+-}
+-
++  return m_pOverlayContainer->GetSubtitleSize() < 5;
++}
++

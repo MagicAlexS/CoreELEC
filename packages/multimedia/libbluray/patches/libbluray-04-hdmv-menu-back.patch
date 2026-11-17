@@ -1,0 +1,405 @@
+Subject: [PATCH] HDMV: support returning through button page history
+
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -1711,8 +1711,9 @@
+         /* playmark tracking */
+         _find_next_playmark(bd);
+ 
+-        /* reset PG decoder and controller */
++        /* A successful seek starts a new playback node for menu Back. */
+         if (bd->graphics_controller) {
++            gc_run(bd->graphics_controller, GC_CTRL_MENU_HISTORY_RESET, 0, NULL);
+             gc_run(bd->graphics_controller, GC_CTRL_PG_RESET, 0, NULL);
+ 
+             _init_textst_timer(bd);
+@@ -4040,6 +4041,44 @@
+     return result;
+ }
+ 
++int bd_menu_back(BLURAY *bd)
++{
++    int result = 0;
++
++    if (!bd) {
++        return -1;
++    }
++
++    bd_mutex_lock(&bd->mutex);
++
++    if (bd->title_type == title_hdmv && bd->graphics_controller && bd->hdmv_vm) {
++        result = _run_gc(bd, GC_CTRL_MENU_BACK, 0);
++    }
++
++    bd_mutex_unlock(&bd->mutex);
++
++    return result;
++}
++
++int bd_menu_close(BLURAY *bd)
++{
++    int result = 0;
++
++    if (!bd) {
++        return -1;
++    }
++
++    bd_mutex_lock(&bd->mutex);
++
++    if (bd->title_type == title_hdmv && bd->graphics_controller && bd->hdmv_vm) {
++        result = _run_gc(bd, GC_CTRL_MENU_CLOSE, 0);
++    }
++
++    bd_mutex_unlock(&bd->mutex);
++
++    return result;
++}
++
+ static int _get_key_uo_index(BLURAY *bd, uint32_t key_id, bd_uo_mask_index_e *uo_index)
+ {
+     unsigned i;
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -1071,6 +1071,28 @@
+ 
+ /**
+  *
++ *  Return to the previous HDMV menu page.
++ *
++ *  BD-J menus and HDMV menus with no previous page return 0.
++ *
++ * @param bd  BLURAY object
++ * @return >0 if returned to a previous page, 0 if no previous HDMV page,
++ *         <0 on error
++ */
++BD_PUBLIC int bd_menu_back(BLURAY *bd);
++
++/**
++ *
++ *  Close the visible HDMV menu without changing playback position.
++ *
++ * @param bd  BLURAY object
++ * @return >0 if a visible menu was closed, 0 if no HDMV menu was open,
++ *         <0 on error
++ */
++BD_PUBLIC int bd_menu_close(BLURAY *bd);
++
++/**
++ *
+  *  Read from currently playing title.
+  *
+  *  When playing disc in navigation mode this function must be used instead of bd_read().
+--- a/src/libbluray/decoders/graphics_controller.c
++++ b/src/libbluray/decoders/graphics_controller.c
+@@ -51,6 +51,13 @@
+ #define GC_ERROR(...) BD_DEBUG(DBG_GC | DBG_CRIT, __VA_ARGS__)
+ #define GC_TRACE(...) BD_DEBUG(DBG_GC,            __VA_ARGS__)
+ 
++#define GC_BACK_HISTORY_MAX 32
++
++typedef struct {
++    uint16_t page_id;
++    uint16_t button_id;
++} GC_BACK_STATE;
++
+ /*
+  *
+  */
+@@ -76,6 +83,7 @@
+     /* state */
+     unsigned        ig_open;
+     unsigned        ig_drawn;
++    unsigned        ig_explicitly_closed;
+     unsigned        ig_dirty;
+     unsigned        pg_open;
+     unsigned        pg_drawn;
+@@ -83,6 +91,9 @@
+     unsigned        popup_visible;
+     unsigned        valid_mouse_position;
+     unsigned        auto_action_triggered;
++    GC_BACK_STATE   back_history[GC_BACK_HISTORY_MAX];
++    unsigned        back_history_count;
++    unsigned        back_history_active;
+     BOG_DATA        bog_data[MAX_NUM_BOGS];
+     BOG_DATA       *saved_bog_data;
+     BD_UO_MASK      page_uo_mask;
+@@ -730,6 +741,10 @@
+ 
+ static void _gc_reset(GRAPHICS_CONTROLLER *gc)
+ {
++    gc->back_history_count = 0;
++    gc->back_history_active = 0;
++    gc->ig_explicitly_closed = 0;
++
+     if (gc->pg_open) {
+         _close_osd(gc, BD_OVERLAY_PG);
+     }
+@@ -877,6 +892,11 @@
+             bd_mutex_unlock(&gc->mutex);
+             return 0;
+         }
++
++        /* Page state belongs to one interactive display set only. */
++        gc->back_history_count = 0;
++        gc->back_history_active = 0;
++        gc->ig_explicitly_closed = 0;
+ 
+         /* TODO: */
+         if (gc->igs->ics) {
+@@ -1391,6 +1411,11 @@
+     gc->button_effect_running = 0;
+     gc->button_animation_running = 0;
+ 
++    if (gc->ig_explicitly_closed) {
++        gc->page_uo_mask = uo_mask_get_empty();
++        return 0;
++    }
++
+     if (s->ics->interactive_composition.ui_model == IG_UI_MODEL_POPUP && !gc->popup_visible) {
+ 
+         gc->page_uo_mask = uo_mask_get_empty();
+@@ -1516,6 +1541,117 @@
+     return 0;
+ }
+ 
++static void _record_back_history(GRAPHICS_CONTROLLER *gc, uint16_t current_page_id,
++                                 uint16_t current_button_id, uint16_t target_page_id)
++{
++    unsigned ii;
++
++    if (!gc->back_history_active) {
++        return;
++    }
++
++    for (ii = 0; ii < gc->back_history_count; ii++) {
++        if (gc->back_history[ii].page_id == target_page_id) {
++            /* Returning to an earlier page discards the forward path. */
++            gc->back_history_count = ii;
++            return;
++        }
++    }
++
++    if (gc->back_history_count == GC_BACK_HISTORY_MAX) {
++        memmove(gc->back_history, gc->back_history + 1,
++                (GC_BACK_HISTORY_MAX - 1) * sizeof(gc->back_history[0]));
++        gc->back_history_count--;
++    }
++
++    gc->back_history[gc->back_history_count].page_id = current_page_id;
++    gc->back_history[gc->back_history_count].button_id = current_button_id;
++    gc->back_history_count++;
++}
++
++static int _menu_back(GRAPHICS_CONTROLLER *gc, GC_NAV_CMDS *cmds)
++{
++    PG_DISPLAY_SET *s;
++    BD_IG_PAGE *page;
++    GC_BACK_STATE target;
++    int result;
++
++    if (gc->ig_explicitly_closed || !gc->back_history_active || !gc->back_history_count) {
++        return 0;
++    }
++
++    s = gc->igs;
++    if (!s || !s->ics) {
++        gc->back_history_count = 0;
++        return 0;
++    }
++
++    target = gc->back_history[gc->back_history_count - 1];
++    page = _find_page(&s->ics->interactive_composition, target.page_id);
++    if (!page || !_find_palette(s, page->palette_id_ref)) {
++        /* Do not retain history that cannot be rendered in this display set. */
++        gc->back_history_count = 0;
++        return 0;
++    }
++
++    _select_page(gc, target.page_id, 0);
++    if (target.button_id != 0xffff &&
++        _find_button_page(page, target.button_id, NULL) &&
++        _is_button_enabled(gc, page, target.button_id)) {
++        _select_button(gc, target.button_id);
++    }
++
++    /* Back restores focus; it must not trigger an auto-action on the page. */
++    gc->auto_action_triggered = 1;
++    result = _render_page(gc, 0xffff, cmds);
++    if (result < 0) {
++        return -1;
++    }
++
++    gc->back_history_count--;
++    return 1;
++}
++
++static int _menu_close(GRAPHICS_CONTROLLER *gc, GC_NAV_CMDS *cmds)
++{
++    unsigned ii;
++    const int was_open = gc->ig_open || gc->ig_drawn;
++
++    gc->ig_explicitly_closed = 1;
++    gc->popup_visible = 0;
++    gc->ig_dirty = 0;
++    gc->ig_drawn = 0;
++    gc->button_effect_running = 0;
++    gc->button_animation_running = 0;
++    gc->in_effects = NULL;
++    gc->out_effects = NULL;
++    gc->effect_idx = 0;
++    gc->user_timeout = 0;
++    gc->valid_mouse_position = 0;
++    gc->page_uo_mask = uo_mask_get_empty();
++
++    if (was_open) {
++        _close_osd(gc, BD_OVERLAY_IG);
++    }
++
++    /* The closed plane has no cached button pixels; keep menu selection state. */
++    for (ii = 0; ii < MAX_NUM_BOGS; ii++) {
++        gc->bog_data[ii].x = 0;
++        gc->bog_data[ii].y = 0;
++        gc->bog_data[ii].w = 0;
++        gc->bog_data[ii].h = 0;
++        gc->bog_data[ii].visible_object_id = -1;
++    }
++
++    /* Popup status means that a popup menu is loaded, not currently visible. */
++    if (cmds && gc->igs && gc->igs->ics &&
++        gc->igs->ics->interactive_composition.ui_model == IG_UI_MODEL_POPUP) {
++        cmds->status |= GC_STATUS_POPUP;
++    }
++
++    return was_open;
++}
++
+ /*
+  * user actions
+  */
+@@ -1553,6 +1689,12 @@
+     if (gc->button_effect_running) {
+         GC_ERROR("_user_input(): button_effect_running\n");
+         return 0;
++    }
++
++    if (!gc->back_history_active) {
++        /* Ignore page changes used to initialize the menu before user input. */
++        gc->back_history_count = 0;
++        gc->back_history_active = 1;
+     }
+ 
+     GC_TRACE("_user_input(%d)\n", key);
+@@ -1681,6 +1823,8 @@
+ 
+         /* page changes */
+ 
++        _record_back_history(gc, bd_psr_read(gc->regs, PSR_MENU_PAGE_ID),
++                             bd_psr_read(gc->regs, PSR_SELECTED_BUTTON_ID), page_id);
+         _select_page(gc, page_id, !effect_flag);
+ 
+     } else {
+@@ -1924,6 +2068,7 @@
+                 if (gc->igs->ics->interactive_composition.ui_model != IG_UI_MODEL_POPUP) {
+ 
+                     if (bd_psr_read(gc->regs, PSR_MENU_PAGE_ID) != 0) {
++                        gc->back_history_count = 0;
+                         _select_page(gc, 0, 0);
+                         result = _render_page(gc, 0xffff, cmds);
+                     }
+@@ -1965,6 +2110,17 @@
+ 
+             bd_mutex_unlock(&gc->mutex);
+             return 0;
++        case GC_CTRL_MENU_HISTORY_RESET:
++            gc->back_history_count = 0;
++            gc->back_history_active = 0;
++
++            bd_mutex_unlock(&gc->mutex);
++            return 0;
++        case GC_CTRL_MENU_CLOSE:
++            result = _menu_close(gc, cmds);
++
++            bd_mutex_unlock(&gc->mutex);
++            return result;
+         case GC_CTRL_PG_UPDATE:
+             if (gc->pgs && gc->pgs->pcs) {
+                 result = _render_pg(gc);
+@@ -2000,6 +2156,10 @@
+     /* other operations require complete display set */
+     if (!gc->igs || !gc->igs->ics || !gc->igs->complete) {
+         GC_TRACE("gc_run(): no interactive composition\n");
++        if (ctrl == GC_CTRL_MENU_BACK) {
++            gc->back_history_count = 0;
++            result = 0;
++        }
+         bd_mutex_unlock(&gc->mutex);
+         return result;
+     }
+@@ -2008,6 +2168,10 @@
+ 
+         case GC_CTRL_SET_BUTTON_PAGE:
+             _set_button_page(gc, param);
++            break;
++
++        case GC_CTRL_MENU_BACK:
++            result = _menu_back(gc, cmds);
+             break;
+ 
+         case GC_CTRL_VK_KEY:
+@@ -2021,13 +2185,24 @@
+ 
+         case GC_CTRL_POPUP:
+             if (gc->igs->ics->interactive_composition.ui_model != IG_UI_MODEL_POPUP) {
+-                /* not pop-up menu */
++                /* Reopen only a non-popup menu explicitly closed by the player. */
++                if (gc->ig_explicitly_closed && param) {
++                    gc->back_history_count = 0;
++                    gc->back_history_active = 0;
++                    gc->ig_explicitly_closed = 0;
++                    gc->auto_action_triggered = 1;
++                    _reset_user_timeout(gc);
++                    result = _render_page(gc, 0xffff, cmds);
++                }
+                 break;
+             }
+ 
+             gc->popup_visible = !!param;
+ 
+             if (gc->popup_visible) {
++                gc->back_history_count = 0;
++                gc->back_history_active = 0;
++                gc->ig_explicitly_closed = 0;
+                 _select_page(gc, 0, 0);
+             }
+ 
+@@ -2040,6 +2215,9 @@
+             break;
+ 
+         case GC_CTRL_INIT_MENU:
++            gc->back_history_count = 0;
++            gc->back_history_active = 0;
++            gc->ig_explicitly_closed = 0;
+             _select_page(gc, 0, 0);
+             _render_page(gc, 0xffff, cmds);
+             break;
+@@ -2066,6 +2244,8 @@
+          * but not handled here.
+          */
+         case GC_CTRL_RESET:
++        case GC_CTRL_MENU_HISTORY_RESET:
++        case GC_CTRL_MENU_CLOSE:
+         case GC_CTRL_PG_RESET:
+         case GC_CTRL_PG_UPDATE:
+         case GC_CTRL_PG_CHARCODE:
+--- a/src/libbluray/decoders/graphics_controller.h
++++ b/src/libbluray/decoders/graphics_controller.h
+@@ -56,6 +56,9 @@
+     GC_CTRL_ENABLE_BUTTON,   /* param: button_id */
+     GC_CTRL_DISABLE_BUTTON,  /* param: button_id */
+     GC_CTRL_SET_BUTTON_PAGE,
++    GC_CTRL_MENU_BACK,       /* Return to the previous HDMV menu page */
++    GC_CTRL_MENU_CLOSE,      /* Close the visible HDMV menu */
++    GC_CTRL_MENU_HISTORY_RESET, /* Clear navigation history after a seek */
+     GC_CTRL_POPUP,           /* param: on/off */
+     GC_CTRL_IG_END,          /* execution of IG object is complete */
+ 

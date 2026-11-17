@@ -1,0 +1,199 @@
+Subject: [PATCH] Bluray: hold read-ahead title end until queued playback drains
+
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -413,6 +413,7 @@
+ // close file and reset everything
+ void CDVDInputStreamBluray::Close()
+ {
++  m_titleEndPending = false;
+   CloseMVCDemux();
+   FreeTitleInfo();
+ 
+@@ -437,6 +438,21 @@
+ }
+ 
+ void CDVDInputStreamBluray::ProcessEvent() {
++
++  // An explicit menu/seek action supersedes a buffered title end. Flush the old
++  // packets, otherwise choosing Play would wait for the rest of the menu audio.
++  if (m_titleEndPending &&
++      (m_event.event == BD_EVENT_SEEK || m_event.event == BD_EVENT_TITLE ||
++       m_event.event == BD_EVENT_PLAYLIST || m_event.event == BD_EVENT_PLAYITEM ||
++       m_event.event == BD_EVENT_CHAPTER ||
++       m_event.event == BD_EVENT_PLAYLIST_STOP))
++  {
++    CLog::Log(LOGINFO, "CDVDInputStreamBluray - navigation supersedes held title end");
++    m_titleEndPending = false;
++    m_hold = HOLD_HELD;
++    if (m_event.event != BD_EVENT_PLAYLIST_STOP)
++      m_player->OnDiscNavResult(nullptr, BD_EVENT_PLAYLIST_STOP);
++  }
+ 
+   int pid = -1, ret;
+   switch (m_event.event) {
+@@ -523,8 +539,10 @@
+ 
+   case BD_EVENT_END_OF_TITLE:
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_END_OF_TITLE {}", m_event.param);
+-    /* when a title ends, playlist WILL eventually change */
+-    FreeTitleInfo();
++    // Keep the title metadata while FFmpeg and the stream players play out
++    // their buffered packets. NextStream consumes the end after that barrier.
++    if (!m_titleEndPending)
++      FreeTitleInfo();
+     break;
+ 
+   case BD_EVENT_TITLE:
+@@ -694,6 +712,14 @@
+ 
+       /* Check for holding events */
+       switch(m_event.event) {
++        case BD_EVENT_END_OF_TITLE:
++          // libbluray resumes the HDMV program on the next read, which may
++          // close an IG menu even while its audio/video is still buffered.
++          m_titleEndPending = true;
++          m_hold = HOLD_HELD;
++          CLog::Log(LOGINFO, "CDVDInputStreamBluray - holding title end before disc navigation");
++          return result;
++
+         case BD_EVENT_SEEK:
+         case BD_EVENT_TITLE:
+         case BD_EVENT_ANGLE:
+@@ -991,6 +1017,12 @@
+   if(bd_seek_time(m_bd, ms * 90) < 0)
+     return false;
+ 
++  if (m_titleEndPending)
++  {
++    m_titleEndPending = false;
++    m_hold = HOLD_DATA;
++  }
++
+   EMPTY_QUEUE(m_clipQueue);
+   while (bd_get_event(m_bd, &m_event))
+     ProcessEvent();
+@@ -1023,6 +1055,12 @@
+ {
+   if(m_titleInfo && bd_seek_chapter(m_bd, ch-1) < 0)
+     return false;
++
++  if (m_titleEndPending)
++  {
++    m_titleEndPending = false;
++    m_hold = HOLD_DATA;
++  }
+ 
+   EMPTY_QUEUE(m_clipQueue);
+   while (bd_get_event(m_bd, &m_event))
+@@ -1125,6 +1163,14 @@
+   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+     return NEXTSTREAM_NONE;
+ 
++  if (m_titleEndPending)
++  {
++    CLog::Log(LOGINFO, "CDVDInputStreamBluray - releasing drained title end");
++    m_titleEndPending = false;
++    m_event.event = BD_EVENT_END_OF_TITLE;
++    m_event.param = 0;
++  }
++
+   /* process any current event */
+   ProcessEvent();
+ 
+@@ -1144,6 +1190,9 @@
+   if(m_bd == nullptr || !m_navmode)
+     return;
+ 
++  // Do not overwrite a held event when draining libbluray's input events.
++  // END remains represented by m_titleEndPending until NextStream releases it.
++  ProcessEvent();
+   int ret = bd_user_input(m_bd, -1, vk);
+   if (ret < 0)
+   {
+@@ -1151,6 +1200,22 @@
+   }
+   else
+   {
++    // Button activation installs HDMV commands executed by bd_read_ext.
++    // Poll without reading stream bytes: a page-only change must preserve the
++    // current demuxer and buffered audio, whereas navigation events below
++    // supersede the held EOF and flush the old title.
++    if (m_titleEndPending && vk == BD_VK_ENTER && ret > 0)
++    {
++      CLog::Log(LOGINFO, "CDVDInputStreamBluray - polling activated menu commands during title drain");
++      for (int i = 0; i < 100; ++i)
++      {
++        if (bd_read_ext(m_bd, nullptr, 0, &m_event) < 0)
++          break;
++        if (m_event.event == BD_EVENT_NONE)
++          break;
++        ProcessEvent();
++      }
++    }
+     /* process all queued up events */
+     while (bd_get_event(m_bd, &m_event))
+       ProcessEvent();
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -111,6 +111,9 @@
+   bool CanSeek() override;
+ 
+ 
++  // A read-ahead EOF must not advance the disc program before playback drains.
++  bool IsHoldingTitleEnd() const { return m_titleEndPending; }
++
+   void UserInput(bd_vk_key_e vk);
+   bool MouseMove(const CPoint &point);
+   bool MouseClick(const CPoint &point);
+@@ -172,6 +175,7 @@
+   bool m_isInMainMenu = false;
+   bool m_hasOverlay = false;
+   bool m_navmode = false;
++  bool m_titleEndPending = false;
+   int m_dispTimeBeforeRead = 0;
+   int                 m_nTitles = -1;
+   std::string         m_root;
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -1372,6 +1372,9 @@
+ 
+   Prepare();
+ 
++#if defined(HAVE_LIBBLURAY)
++  bool blurayTitleDraining = false;
++#endif
+   while (!m_bAbortRequest)
+   {
+     // check display lost
+@@ -1491,6 +1494,30 @@
+       // when paused, demuxer could be be returning empty
+       if (m_playSpeed == DVD_PLAYSPEED_PAUSE)
+         continue;
++
++#if defined(HAVE_LIBBLURAY)
++      const auto bluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++      if (bluray && bluray->IsHoldingTitleEnd())
++      {
++        // Keep HandleMessages/HandlePlaySpeed running while output drains:
++        // startup sync and menu keys must not block in CloseStream's wait.
++        SetCaching(CACHESTATE_DONE);
++        if (!blurayTitleDraining)
++        {
++          CLog::Log(LOGINFO, "VideoPlayer: draining Blu-ray title before advancing navigation");
++          if (m_CurrentVideo.inited)
++            m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++          blurayTitleDraining = true;
++        }
++        if (m_VideoPlayerAudio->HasData() || m_VideoPlayerVideo->HasData())
++        {
++          CThread::Sleep(10ms);
++          continue;
++        }
++        CLog::Log(LOGINFO, "VideoPlayer: Blu-ray title queues drained");
++      }
++      blurayTitleDraining = false;
++#endif
+ 
+       // check for a still frame state
+       if (std::shared_ptr<CDVDInputStream::IMenus> pStream = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))

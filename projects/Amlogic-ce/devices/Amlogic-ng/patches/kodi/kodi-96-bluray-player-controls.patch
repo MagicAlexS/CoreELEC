@@ -1,0 +1,353 @@
+Subject: [PATCH] Bluray: synchronize track selection and restore player controls
+
+--- a/xbmc/application/Application.cpp
++++ b/xbmc/application/Application.cpp
+@@ -1182,7 +1182,8 @@
+   bool bIsPlayingPVRChannel = (CServiceBroker::GetPVRManager().IsStarted() &&
+                                CurrentFileItem().IsPVRChannel());
+ 
+-  bool bNotifyPlayer = false;
++  // Disc navigation is also available from the player OSD/settings dialogs.
++  bool bNotifyPlayer = action.GetID() == ACTION_SHOW_VIDEOMENU && appPlayer->IsPlayingVideo();
+   if (CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow() == WINDOW_FULLSCREEN_VIDEO)
+     bNotifyPlayer = true;
+   else if (CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow() == WINDOW_FULLSCREEN_GAME)
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -591,23 +591,29 @@
+     /* stream selection */
+ 
+   case BD_EVENT_AUDIO_STREAM:
++    m_audioStreamId = m_event.param == 0xff ? 0 : m_event.param;
++    m_audioStreamIdKnown = true;
+     pid = -1;
+-    if (m_titleInfo && m_clip && static_cast<uint32_t>(m_clip->audio_stream_count) > (m_event.param - 1))
+-      pid = m_clip->audio_streams[m_event.param - 1].pid;
++    if (m_clip && m_audioStreamId > 0 && m_audioStreamId <= m_clip->audio_stream_count)
++      pid = m_clip->audio_streams[m_audioStreamId - 1].pid;
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_AUDIO_STREAM {} {}", m_event.param, pid);
+     m_player->OnDiscNavResult(static_cast<void*>(&pid), BD_EVENT_AUDIO_STREAM);
+     break;
+ 
+   case BD_EVENT_PG_TEXTST:
++    m_pgTextstEnabled = m_event.param != 0;
++    m_pgTextstEnabledKnown = true;
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_PG_TEXTST {}", m_event.param);
+     pid = m_event.param;
+     m_player->OnDiscNavResult(static_cast<void*>(&pid), BD_EVENT_PG_TEXTST);
+     break;
+ 
+   case BD_EVENT_PG_TEXTST_STREAM:
++    m_pgStreamId = m_event.param == 0xfff ? 0 : m_event.param;
++    m_pgStreamIdKnown = true;
+     pid = -1;
+-    if (m_titleInfo && m_clip && static_cast<uint32_t>(m_clip->pg_stream_count) > (m_event.param - 1))
+-      pid = m_clip->pg_streams[m_event.param - 1].pid;
++    if (m_clip && m_pgStreamId > 0 && m_pgStreamId <= m_clip->pg_stream_count)
++      pid = m_clip->pg_streams[m_pgStreamId - 1].pid;
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_PG_TEXTST_STREAM {}, {}", m_event.param,
+               pid);
+     m_player->OnDiscNavResult(static_cast<void*>(&pid), BD_EVENT_PG_TEXTST_STREAM);
+@@ -1158,6 +1164,95 @@
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::GetStreamInfo - unhandled pid {}", pid);
+ }
+ 
++bool CDVDInputStreamBluray::SelectStreamByPid(int pid, bool audio, bool enable)
++{
++  if (!m_navmode || !m_bd || !m_clip || pid < 0)
++    return false;
++
++  const BLURAY_STREAM_INFO* streams =
++      audio ? m_clip->audio_streams : m_clip->pg_streams;
++  const uint32_t streamCount =
++      audio ? m_clip->audio_stream_count : m_clip->pg_stream_count;
++  uint32_t streamId = 0;
++  for (uint32_t i = 0; i < streamCount; ++i)
++  {
++    if (streams[i].pid == pid)
++    {
++      streamId = i + 1;
++      break;
++    }
++  }
++  if (streamId == 0)
++  {
++    CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::SelectStreamByPid - PID {} not in current clip",
++              pid);
++    return false;
++  }
++
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++
++  const int ret = bd_select_stream(m_bd, audio ? BLURAY_AUDIO_STREAM : BLURAY_PG_TEXTST_STREAM,
++                                   streamId, audio ? 1 : (enable ? 1 : 0));
++
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++
++  if (ret < 0)
++  {
++    CLog::Log(LOGWARNING, "CDVDInputStreamBluray::SelectStreamByPid - libbluray rejected type {}",
++              audio ? "audio" : "subtitle");
++    return false;
++  }
++
++  if (audio)
++  {
++    // Audio selection returns 1 when accepted, including when already selected.
++    // If no event was needed, retain the confirmed register value for later checks.
++    if (ret > 0 && !m_audioStreamIdKnown)
++    {
++      m_audioStreamId = streamId;
++      m_audioStreamIdKnown = true;
++    }
++    return m_audioStreamIdKnown && m_audioStreamId == streamId;
++  }
++
++  // PG may change the stream and visibility independently if one UO is masked.
++  // Confirm both values from the resulting event state to avoid reporting success
++  // when only one part of the request was applied.
++  return m_pgStreamIdKnown && m_pgStreamId == streamId && m_pgTextstEnabledKnown &&
++         m_pgTextstEnabled == enable;
++}
++
++bool CDVDInputStreamBluray::SetSubtitleVisible(bool visible)
++{
++  if (!m_navmode || !m_bd || !m_clip || !m_pgStreamIdKnown || !m_pgTextstEnabledKnown)
++    return false;
++
++  if (m_pgStreamId == 0)
++    return !visible && !m_pgTextstEnabled;
++
++  if (m_pgStreamId > m_clip->pg_stream_count)
++    return false;
++
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++
++  const int ret = bd_select_stream(m_bd, BLURAY_PG_TEXTST_STREAM, m_pgStreamId,
++                                   visible ? 1 : 0);
++
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++
++  if (ret < 0)
++    return false;
++
++  // A zero return can mean no change or a UO restriction. The cached state is
++  // updated only by libbluray events, so it distinguishes those outcomes.
++  return m_pgStreamIdKnown && m_pgTextstEnabledKnown &&
++         m_pgTextstEnabled == visible && m_pgStreamId != 0;
++}
++
+ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
+ {
+   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+@@ -1264,33 +1359,39 @@
+ 
+ bool CDVDInputStreamBluray::OnMenu()
+ {
+-  if(m_bd == nullptr || !m_navmode)
+-  {
+-    CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OnMenu - navigation mode not enabled");
+-    return false;
+-  }
+-
+-  // we can not use this event to track a possible popup menu state since bd-j blu-rays can
+-  // toggle the popup menu on their own without firing this event, and if they do this, our
+-  // internal tracking state would be wrong. So just process and return.
+-  if(bd_user_input(m_bd, -1, BD_VK_POPUP) >= 0)
+-  {
+-    return true;
+-  }
+-
+-  CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OnMenu - popup failed, trying root");
+-
+-  if (bd_user_input(m_bd, -1, BD_VK_ROOT_MENU) >= 0)
+-  {
+-    return true;
+-  }
+-
+-  CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OnMenu - root failed, trying explicit");
+-  if (bd_menu_call(m_bd, -1) <= 0)
+-  {
+-    CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OnMenu - root failed");
+-    return false;
+-  }
++  if (!m_bd || !m_navmode)
++    return false;
++
++  // Consume queued navigation before installing a new menu command.
++  ProcessEvent();
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++
++  int ret = bd_user_input(m_bd, -1, BD_VK_POPUP);
++  if (ret < 0)
++  {
++    CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OnMenu - trying root menu");
++    // ROOT_MENU is bd_menu_call internally: zero means it was not accepted.
++    ret = bd_menu_call(m_bd, -1);
++    if (ret <= 0)
++      return false;
++  }
++
++  while (bd_get_event(m_bd, &m_event))
++    ProcessEvent();
++
++  // A menu button can install HDMV VM commands while input is held at EOF.
++  // Only poll an activation, never resume the default end program for a no-op.
++  if (m_titleEndPending && ret > 0)
++  {
++    for (int i = 0; i < 100; ++i)
++    {
++      if (bd_read_ext(m_bd, nullptr, 0, &m_event) < 0 || m_event.event == BD_EVENT_NONE)
++        break;
++      ProcessEvent();
++    }
++  }
++  CLog::Log(LOGINFO, "CDVDInputStreamBluray::OnMenu - menu request accepted ({})", ret);
+   return true;
+ }
+ 
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -133,6 +133,12 @@
+ 
+   void GetStreamInfo(int pid, std::string &language);
+ 
++  // Menu-mode stream selection. Success means libbluray's current state matches
++  // the requested PID and subtitle visibility, even when no state change was needed.
++  bool IsNavigationMode() const { return m_navmode; }
++  bool SelectStreamByPid(int pid, bool audio, bool enable = true);
++  bool SetSubtitleVisible(bool visible);
++
+   int Get3dSubtitlePlane(uint16_t pid);
+ 
+   void OverlayCallback(const BD_OVERLAY * const);
+@@ -170,6 +176,12 @@
+   BLURAY_TITLE_INFO* m_titleInfo = nullptr;
+   uint32_t m_playlist = MAX_PLAYLIST_ID + 1;
+   BLURAY_CLIP_INFO* m_clip = nullptr;
++  uint32_t m_audioStreamId = 0;
++  bool m_audioStreamIdKnown = false;
++  uint32_t m_pgStreamId = 0;
++  bool m_pgStreamIdKnown = false;
++  bool m_pgTextstEnabled = false;
++  bool m_pgTextstEnabledKnown = false;
+   uint32_t m_angle = 0;
+   bool m_menu = false;
+   bool m_isInMainMenu = false;
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -2851,6 +2851,32 @@
+       SelectionStream& st = m_SelectionStreams.Get(STREAM_AUDIO, pMsg2->GetStreamId());
+       if(st.source != STREAM_SOURCE_NONE)
+       {
++#if defined(HAVE_LIBBLURAY)
++        const auto bluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++        if (bluray && bluray->IsNavigationMode() &&
++            STREAM_SOURCE_MASK(st.source) == STREAM_SOURCE_DEMUX)
++        {
++          const auto stream = m_pDemuxer ? m_pDemuxer->GetStream(st.demuxerId, st.id) : nullptr;
++          if (!stream || !bluray->SelectStreamByPid(stream->dvdNavId, true, true))
++          {
++            CLog::Log(LOGWARNING, "VideoPlayer: Blu-ray rejected audio stream selection");
++            m_processInfo->GetVideoSettingsLocked().SetAudioStream(GetAudioStream());
++            continue;
++          }
++          CLog::Log(LOGINFO, "VideoPlayer: Blu-ray audio selection confirmed, PID {}", stream->dvdNavId);
++          CloseStream(m_CurrentAudio, false);
++          OpenStream(m_CurrentAudio, st.demuxerId, st.id, st.source);
++          AdaptForcedSubtitles();
++          CDVDMsgPlayerSeek::CMode mode;
++          mode.time = static_cast<int>(GetUpdatedTime());
++          mode.backward = true;
++          mode.accurate = true;
++          mode.trickplay = true;
++          mode.sync = true;
++          m_messenger.Put(std::make_shared<CDVDMsgPlayerSeek>(mode));
++          continue;
++        }
++#endif
+         if(st.source == STREAM_SOURCE_NAV && m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
+         {
+           std::shared_ptr<CDVDInputStreamNavigator> pStream = std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream);
+@@ -2927,6 +2953,25 @@
+       SelectionStream& st = m_SelectionStreams.Get(STREAM_SUBTITLE, pMsg2->GetStreamId());
+       if(st.source != STREAM_SOURCE_NONE)
+       {
++#if defined(HAVE_LIBBLURAY)
++        const auto bluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++        if (bluray && bluray->IsNavigationMode() &&
++            STREAM_SOURCE_MASK(st.source) == STREAM_SOURCE_DEMUX)
++        {
++          const auto stream = m_pDemuxer ? m_pDemuxer->GetStream(st.demuxerId, st.id) : nullptr;
++          if (!stream || !bluray->SelectStreamByPid(stream->dvdNavId, false, m_VideoPlayerVideo->IsSubtitleEnabled()))
++          {
++            CLog::Log(LOGWARNING, "VideoPlayer: Blu-ray rejected subtitle stream selection");
++            m_processInfo->GetVideoSettingsLocked().SetSubtitleStream(GetSubtitle());
++            continue;
++          }
++          CLog::Log(LOGINFO, "VideoPlayer: Blu-ray subtitle selection confirmed, PID {}", stream->dvdNavId);
++          CloseStream(m_CurrentSubtitle, false);
++          OpenStream(m_CurrentSubtitle, st.demuxerId, st.id, st.source);
++
++          continue;
++        }
++#endif
+         if(st.source == STREAM_SOURCE_NAV && m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
+         {
+           std::shared_ptr<CDVDInputStreamNavigator> pStream = std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream);
+@@ -2948,11 +2993,11 @@
+     {
+       bool isVisible = std::static_pointer_cast<CDVDMsgBool>(pMsg)->m_value;
+ 
+-      // SetEnableStream only if not visible, when visible OpenStream already implied that stream is enabled
+-      if (!isVisible)
++      SetSubtitleVisibleInternal(isVisible, m_CurrentSubtitle.source);
++      // A rejected disc request must not disable the still-selected stream.
++      // When visible, OpenStream already implied that the stream is enabled.
++      if (!m_VideoPlayerVideo->IsSubtitleEnabled())
+         SetEnableStream(m_CurrentSubtitle, false);
+-
+-      SetSubtitleVisibleInternal(isVisible, m_CurrentSubtitle.source);
+     }
+     else if (pMsg->IsType(CDVDMsg::PLAYER_SET_PROGRAM))
+     {
+@@ -3461,6 +3506,18 @@
+ 
+ void CVideoPlayer::SetSubtitleVisibleInternal(bool bVisible, int subtitleSource)
+ {
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = std::dynamic_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++  if (bluray && bluray->IsNavigationMode() && !IsExternalSubtitleSource(subtitleSource) &&
++      !bluray->SetSubtitleVisible(bVisible))
++  {
++    CLog::Log(LOGWARNING, "VideoPlayer: Blu-ray rejected subtitle visibility change");
++    m_processInfo->GetVideoSettingsLocked().SetSubtitleVisible(
++        m_VideoPlayerVideo->IsSubtitleEnabled());
++    CServiceBroker::GetDataCacheCore().SignalSubtitleInfoChange();
++    return;
++  }
++#endif
+   m_VideoPlayerVideo->EnableSubtitle(bVisible);
+ 
+   if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD) &&
+@@ -4159,8 +4216,13 @@
+       break;
+     case BD_EVENT_PG_TEXTST:
+     {
+-      bool enable = (*static_cast<int*>(pData) != 0);
+-      m_VideoPlayerVideo->EnableSubtitle(enable);
++      // Disc subtitle events must not hide a separately selected external subtitle.
++      if (!IsExternalSubtitleSource(m_CurrentSubtitle.source))
++      {
++        const bool enable = (*static_cast<int*>(pData) != 0);
++        m_VideoPlayerVideo->EnableSubtitle(enable);
++        CServiceBroker::GetDataCacheCore().SignalSubtitleInfoChange();
++      }
+     }
+     break;
+     case BD_EVENT_STILL_TIME:
